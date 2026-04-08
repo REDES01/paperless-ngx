@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from collections.abc import Iterator
     from datetime import datetime
 
     from numpy import ndarray
@@ -304,12 +303,15 @@ class DocumentClassifier:
         labels_correspondent = []
         labels_document_type = []
         labels_storage_path = []
+        doc_contents: list[str] = []
 
-        # Step 1: Extract and preprocess training data from the database.
+        # Step 1: Extract labels and capture content in a single pass.
         logger.debug("Gathering data from database...")
         notify(f"Gathering data from {docs_queryset.count()} document(s)...")
         hasher = sha256()
         for doc in docs_queryset:
+            doc_contents.append(doc.content)
+
             y = -1
             dt = doc.document_type
             if dt and dt.matching_algorithm == MatchingModel.MATCH_AUTO:
@@ -369,13 +371,6 @@ class DocumentClassifier:
         logger.debug("Vectorizing data...")
         notify("Vectorizing document content...")
 
-        def content_generator() -> Iterator[str]:
-            """
-            Generates the content for documents, but once at a time
-            """
-            for doc in docs_queryset:
-                yield self.preprocess_content(doc.content, shared_cache=False)
-
         self.data_vectorizer = CountVectorizer(
             analyzer="word",
             ngram_range=(1, 2),
@@ -383,7 +378,8 @@ class DocumentClassifier:
         )
 
         data_vectorized: ndarray = self.data_vectorizer.fit_transform(
-            content_generator(),
+            self.preprocess_content(content, shared_cache=False)
+            for content in doc_contents
         )
 
         # See the notes here:
