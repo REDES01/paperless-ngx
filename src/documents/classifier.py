@@ -363,9 +363,11 @@ class DocumentClassifier:
         )
 
         from sklearn.feature_extraction.text import CountVectorizer
+        from sklearn.multiclass import OneVsRestClassifier
         from sklearn.neural_network import MLPClassifier
         from sklearn.preprocessing import LabelBinarizer
         from sklearn.preprocessing import MultiLabelBinarizer
+        from sklearn.svm import LinearSVC
 
         # Step 2: vectorize data
         logger.debug("Vectorizing data...")
@@ -393,8 +395,10 @@ class DocumentClassifier:
             notify(f"Training tags classifier ({num_tags} tag(s))...")
 
             if num_tags == 1:
-                # Special case where only one tag has auto:
-                # Fallback to binary classification.
+                # Special case: only one AUTO tag — use binary classification.
+                # MLPClassifier is used here because LinearSVC requires at least
+                # 2 distinct classes in training data, which cannot be guaranteed
+                # when all documents share the single AUTO tag.
                 labels_tags = [
                     label[0] if len(label) == 1 else -1 for label in labels_tags
                 ]
@@ -402,11 +406,15 @@ class DocumentClassifier:
                 labels_tags_vectorized: ndarray = self.tags_binarizer.fit_transform(
                     labels_tags,
                 ).ravel()
+                self.tags_classifier = MLPClassifier(tol=0.01)
             else:
+                # General multi-label case: LinearSVC via OneVsRestClassifier.
+                # Vastly more memory- and time-efficient than MLPClassifier for
+                # large class counts (e.g. hundreds of AUTO tags).
                 self.tags_binarizer = MultiLabelBinarizer()
                 labels_tags_vectorized = self.tags_binarizer.fit_transform(labels_tags)
+                self.tags_classifier = OneVsRestClassifier(LinearSVC())
 
-            self.tags_classifier = MLPClassifier(tol=0.01)
             self.tags_classifier.fit(data_vectorized, labels_tags_vectorized)
         else:
             self.tags_classifier = None
