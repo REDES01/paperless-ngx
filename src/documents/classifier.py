@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 from django.conf import settings
 from django.core.cache import cache
 from django.core.cache import caches
+from django.db.models import Max
 
 from documents.caching import CACHE_5_MINUTES
 from documents.caching import CACHE_50_MINUTES
@@ -99,7 +100,8 @@ class DocumentClassifier:
     # v8 - Added storage path classifier
     # v9 - Changed from hashing to time/ids for re-train check
     # v10 - HMAC-signed model file
-    FORMAT_VERSION = 10
+    # v11 - Added auto-label-set digest for fast skip without full document scan
+    FORMAT_VERSION = 11
 
     HMAC_SIZE = 32  # SHA-256 digest length
 
@@ -108,6 +110,8 @@ class DocumentClassifier:
         self.last_doc_change_time: datetime | None = None
         # Hash of primary keys of AUTO matching values last used in training
         self.last_auto_type_hash: bytes | None = None
+        # Digest of the set of all MATCH_AUTO label PKs (fast-skip guard)
+        self.last_auto_label_set_digest: bytes | None = None
 
         self.data_vectorizer = None
         self.data_vectorizer_hash = None
@@ -140,6 +144,29 @@ class DocumentClassifier:
             sha256,
         ).digest()
 
+    @staticmethod
+    def _compute_auto_label_set_digest() -> bytes:
+        """
+        Return a SHA-256 digest of all MATCH_AUTO label PKs across the four
+        label types.  Four cheap indexed queries; stable for any fixed set of
+        AUTO labels regardless of document assignments.
+        """
+        from documents.models import Correspondent
+        from documents.models import DocumentType
+        from documents.models import StoragePath
+        from documents.models import Tag
+
+        hasher = sha256()
+        for model in (Correspondent, DocumentType, Tag, StoragePath):
+            pks = sorted(
+                model.objects.filter(
+                    matching_algorithm=MatchingModel.MATCH_AUTO,
+                ).values_list("pk", flat=True),
+            )
+            for pk in pks:
+                hasher.update(pk.to_bytes(4, "little", signed=False))
+        return hasher.digest()
+
     def load(self) -> None:
         from sklearn.exceptions import InconsistentVersionWarning
 
@@ -161,6 +188,7 @@ class DocumentClassifier:
                     schema_version,
                     self.last_doc_change_time,
                     self.last_auto_type_hash,
+                    self.last_auto_label_set_digest,
                     self.data_vectorizer,
                     self.tags_binarizer,
                     self.tags_classifier,
@@ -202,6 +230,7 @@ class DocumentClassifier:
                 self.FORMAT_VERSION,
                 self.last_doc_change_time,
                 self.last_auto_type_hash,
+                self.last_auto_label_set_digest,
                 self.data_vectorizer,
                 self.tags_binarizer,
                 self.tags_classifier,
@@ -223,6 +252,39 @@ class DocumentClassifier:
         status_callback: Callable[[str], None] | None = None,
     ) -> bool:
         notify = status_callback if status_callback is not None else lambda _: None
+
+        # Fast skip: avoid the expensive per-document label scan when nothing
+        # has changed.  Requires a prior training run to have populated both
+        # last_doc_change_time and last_auto_label_set_digest.
+        if (
+            self.last_doc_change_time is not None
+            and self.last_auto_label_set_digest is not None
+        ):
+            latest_mod = Document.objects.exclude(
+                tags__is_inbox_tag=True,
+            ).aggregate(Max("modified"))["modified__max"]
+            if latest_mod is not None and latest_mod <= self.last_doc_change_time:
+                current_digest = self._compute_auto_label_set_digest()
+                if current_digest == self.last_auto_label_set_digest:
+                    logger.info("No updates since last training")
+                    cache.set(
+                        CLASSIFIER_MODIFIED_KEY,
+                        self.last_doc_change_time,
+                        CACHE_50_MINUTES,
+                    )
+                    cache.set(
+                        CLASSIFIER_HASH_KEY,
+                        self.last_auto_type_hash.hex()
+                        if self.last_auto_type_hash
+                        else "",
+                        CACHE_50_MINUTES,
+                    )
+                    cache.set(
+                        CLASSIFIER_VERSION_KEY,
+                        self.FORMAT_VERSION,
+                        CACHE_50_MINUTES,
+                    )
+                    return False
 
         # Get non-inbox documents
         docs_queryset = (
@@ -282,25 +344,7 @@ class DocumentClassifier:
 
         num_tags = len(labels_tags_unique)
 
-        # Check if retraining is actually required.
-        # A document has been updated since the classifier was trained
-        # New auto tags, types, correspondent, storage paths exist
         latest_doc_change = docs_queryset.latest("modified").modified
-        if (
-            self.last_doc_change_time is not None
-            and self.last_doc_change_time >= latest_doc_change
-        ) and self.last_auto_type_hash == hasher.digest():
-            logger.info("No updates since last training")
-            # Set the classifier information into the cache
-            # Caching for 50 minutes, so slightly less than the normal retrain time
-            cache.set(
-                CLASSIFIER_MODIFIED_KEY,
-                self.last_doc_change_time,
-                CACHE_50_MINUTES,
-            )
-            cache.set(CLASSIFIER_HASH_KEY, hasher.hexdigest(), CACHE_50_MINUTES)
-            cache.set(CLASSIFIER_VERSION_KEY, self.FORMAT_VERSION, CACHE_50_MINUTES)
-            return False
 
         # subtract 1 since -1 (null) is also part of the classes.
 
@@ -416,6 +460,7 @@ class DocumentClassifier:
 
         self.last_doc_change_time = latest_doc_change
         self.last_auto_type_hash = hasher.digest()
+        self.last_auto_label_set_digest = self._compute_auto_label_set_digest()
         self._update_data_vectorizer_hash()
 
         # Set the classifier information into the cache
