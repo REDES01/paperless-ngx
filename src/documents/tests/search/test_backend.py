@@ -563,8 +563,11 @@ class TestFieldHandling:
 class TestHighlightHits:
     """Test highlight_hits returns proper HTML strings, not raw Snippet objects."""
 
-    def test_highlights_content_returns_html_string(self, backend: TantivyBackend):
-        """highlight_hits must return HTML strings (from Snippet.to_html()), not Snippet objects."""
+    def test_highlights_content_returns_match_span_html(
+        self,
+        backend: TantivyBackend,
+    ):
+        """highlight_hits must return frontend-ready highlight spans."""
         doc = Document.objects.create(
             title="Highlight Test",
             content="The quick brown fox jumps over the lazy dog",
@@ -582,13 +585,15 @@ class TestHighlightHits:
         assert isinstance(content_highlight, str), (
             f"Expected str, got {type(content_highlight)}: {content_highlight!r}"
         )
-        # Tantivy wraps matched terms in <b> tags
-        assert "<b>" in content_highlight, (
-            f"Expected HTML with <b> tags, got: {content_highlight!r}"
+        assert '<span class="match">' in content_highlight, (
+            f"Expected HTML with match span, got: {content_highlight!r}"
         )
 
-    def test_highlights_notes_returns_html_string(self, backend: TantivyBackend):
-        """Note highlights must be HTML strings via notes_text companion field.
+    def test_highlights_notes_returns_match_span_html(
+        self,
+        backend: TantivyBackend,
+    ):
+        """Note highlights must be frontend-ready HTML via notes_text companion field.
 
         The notes JSON field does not support tantivy SnippetGenerator; the
         notes_text plain-text field is used instead.  We use the full-text
@@ -618,8 +623,8 @@ class TestHighlightHits:
         assert isinstance(note_highlight, str), (
             f"Expected str, got {type(note_highlight)}: {note_highlight!r}"
         )
-        assert "<b>" in note_highlight, (
-            f"Expected HTML with <b> tags, got: {note_highlight!r}"
+        assert '<span class="match">' in note_highlight, (
+            f"Expected HTML with match span, got: {note_highlight!r}"
         )
 
     def test_empty_doc_list_returns_empty_hits(self, backend: TantivyBackend):

@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import UTC
 from datetime import datetime
 from enum import StrEnum
+from html import escape
 from typing import TYPE_CHECKING
 from typing import Self
 from typing import TypedDict
@@ -52,6 +53,36 @@ class SearchMode(StrEnum):
     QUERY = "query"
     TEXT = "text"
     TITLE = "title"
+
+
+def _render_snippet_html(snippet: tantivy.Snippet) -> str:
+    fragment = snippet.fragment()
+    highlighted = sorted(snippet.highlighted(), key=lambda r: r.start)
+
+    if not highlighted:
+        return escape(fragment)
+
+    parts: list[str] = []
+    cursor = 0
+    fragment_len = len(fragment)
+
+    for highlight in highlighted:
+        start = max(0, min(fragment_len, highlight.start))
+        end = max(start, min(fragment_len, highlight.end))
+
+        if end <= cursor:
+            continue
+
+        if start > cursor:
+            parts.append(escape(fragment[cursor:start]))
+
+        parts.append(f'<span class="match">{escape(fragment[start:end])}</span>')
+        cursor = end
+
+    if cursor < fragment_len:
+        parts.append(escape(fragment[cursor:]))
+
+    return "".join(parts)
 
 
 def _extract_autocomplete_words(text_sources: list[str]) -> set[str]:
@@ -606,7 +637,9 @@ class TantivyBackend:
                         "content",
                     )
 
-                content_html = snippet_generator.snippet_from_doc(actual_doc).to_html()
+                content_html = _render_snippet_html(
+                    snippet_generator.snippet_from_doc(actual_doc),
+                )
                 if content_html:
                     highlights["content"] = content_html
 
@@ -620,9 +653,9 @@ class TantivyBackend:
                             self._schema,
                             "notes_text",
                         )
-                    notes_html = notes_snippet_generator.snippet_from_doc(
-                        actual_doc,
-                    ).to_html()
+                    notes_html = _render_snippet_html(
+                        notes_snippet_generator.snippet_from_doc(actual_doc),
+                    )
                     if notes_html:
                         highlights["notes"] = notes_html
 
