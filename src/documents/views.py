@@ -919,7 +919,7 @@ class DocumentViewSet(
                     ),
                 ),
                 "tags",
-                "custom_fields",
+                "custom_fields__field",
                 "notes",
             )
         )

@@ -884,10 +884,16 @@ class ObjectOwnedOrGrantedPermissionsFilter(ObjectPermissionsFilter):
     """
 
     def filter_queryset(self, request, queryset, view):
+        # django-guardian's get_objects_for_user builds its own queryset
+        # internally and loses prefetch_related declarations.  Use its result
+        # as a subquery so we can filter the original queryset (which retains
+        # all prefetch hints) rather than returning guardian's queryset directly.
         objects_with_perms = super().filter_queryset(request, queryset, view)
-        objects_owned = queryset.filter(owner=request.user)
-        objects_unowned = queryset.filter(owner__isnull=True)
-        return objects_with_perms | objects_owned | objects_unowned
+        return queryset.filter(
+            Q(pk__in=objects_with_perms)
+            | Q(owner=request.user)
+            | Q(owner__isnull=True),
+        )
 
 
 class ObjectOwnedPermissionsFilter(ObjectPermissionsFilter):
