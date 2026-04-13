@@ -155,6 +155,173 @@ class StoragePath(MatchingModel):
         verbose_name_plural = _("storage paths")
 
 
+class DocumentVersion(models.Model):
+    """
+    Stores per-version file data for a document.
+    Version 1 is created on initial consume; subsequent uploads add higher numbers.
+    Document.filename / content / checksum always reflect the latest version.
+    DocumentVersion.pk is used as the version ID in API calls.
+    version_number is a per-document sequential integer used for filename suffixes (_v2, etc.).
+    """
+
+    MAX_STORED_FILENAME_LENGTH: Final[int] = 1024
+
+    document = models.ForeignKey(
+        "Document",
+        on_delete=models.CASCADE,
+        related_name="versions",
+        verbose_name=_("document"),
+    )
+
+    version_number = models.PositiveSmallIntegerField(
+        _("version number"),
+        help_text=_("Sequential version number within this document, starting at 1."),
+    )
+
+    version_label = models.CharField(
+        _("version label"),
+        max_length=64,
+        blank=True,
+        null=True,
+        help_text=_("Optional short label for this version."),
+    )
+
+    added = models.DateTimeField(
+        _("added"),
+        default=timezone.now,
+        editable=False,
+        db_index=True,
+    )
+
+    checksum = models.CharField(
+        _("checksum"),
+        max_length=64,
+        editable=False,
+        help_text=_("SHA-256 checksum of the original file for this version."),
+    )
+
+    archive_checksum = models.CharField(
+        _("archive checksum"),
+        max_length=64,
+        blank=True,
+        null=True,
+        editable=False,
+    )
+
+    content = models.TextField(
+        _("content"),
+        blank=True,
+        help_text=_("OCR text content of this version."),
+    )
+
+    page_count = models.PositiveIntegerField(
+        _("page count"),
+        blank=True,
+        null=True,
+        validators=[MinValueValidator(1)],
+    )
+
+    mime_type = models.CharField(_("mime type"), max_length=256, editable=False)
+
+    original_filename = models.CharField(
+        _("original filename"),
+        max_length=MAX_STORED_FILENAME_LENGTH,
+        editable=False,
+        null=True,
+        blank=True,
+    )
+
+    filename = models.FilePathField(
+        _("filename"),
+        max_length=MAX_STORED_FILENAME_LENGTH,
+        editable=False,
+        default=None,
+        null=True,
+        help_text=_("Stored filename for this version's original file."),
+    )
+
+    archive_filename = models.FilePathField(
+        _("archive filename"),
+        max_length=MAX_STORED_FILENAME_LENGTH,
+        editable=False,
+        default=None,
+        null=True,
+    )
+
+    class Meta:
+        ordering = ["-version_number"]
+        verbose_name = _("document version")
+        verbose_name_plural = _("document versions")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "version_number"],
+                name="documents_documentversion_doc_number_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"DocumentVersion {self.version_number} of document {self.document_id}"
+
+    @property
+    def source_path(self) -> Path:
+        if self.filename is None:
+            raise ValueError(f"DocumentVersion {self.pk} has no filename set")
+        return (settings.ORIGINALS_DIR / Path(str(self.filename))).resolve()
+
+    @property
+    def has_archive_version(self) -> bool:
+        return self.archive_filename is not None
+
+    @property
+    def archive_path(self) -> Path | None:
+        if self.archive_filename is not None:
+            return (settings.ARCHIVE_DIR / Path(str(self.archive_filename))).resolve()
+        return None
+
+    @property
+    def thumbnail_path(self) -> Path:
+        # Prefix "v" avoids collision with Document thumbnails ({pk:07}.webp)
+        return (settings.THUMBNAIL_DIR / f"v{self.pk:07}.webp").resolve()
+
+    @property
+    def source_file(self):
+        return self.source_path.open("rb")
+
+    @property
+    def archive_file(self):
+        return Path(self.archive_path).open("rb")
+
+    @property
+    def thumbnail_file(self):
+        return self.thumbnail_path.open("rb")
+
+    @property
+    def file_type(self) -> str:
+        return get_default_file_extension(self.mime_type)
+
+    def get_public_filename(self, *, archive=False, counter=0, suffix=None) -> str:
+        """
+        Returns a sanitized filename for download, mirroring Document.get_public_filename().
+        Uses the parent document's title and correspondent for the human-readable name,
+        and this version's own mime_type for the file extension.
+        """
+        doc = self.document  # cached FK access -- no extra query if already in memory
+        result = str(doc)  # "YYYY-MM-DD [Correspondent] Title" from Document.__str__
+
+        if counter:
+            result += f"_{counter:02}"
+
+        if suffix:
+            result += suffix
+
+        if archive:
+            result += ".pdf"
+        else:
+            result += self.file_type
+
+        return pathvalidate.sanitize_filename(result, replacement_text="-")
+
+
 class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-missing]
     MAX_STORED_FILENAME_LENGTH: Final[int] = 1024
 
@@ -310,45 +477,10 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
         ),
     )
 
-    root_document = models.ForeignKey(
-        "self",
-        blank=True,
-        null=True,
-        related_name="versions",
-        on_delete=models.CASCADE,
-        verbose_name=_("root document for this version"),
-    )
-
-    version_index = models.PositiveIntegerField(
-        _("version index"),
-        blank=True,
-        null=True,
-        db_index=True,
-        help_text=_("Index of this version within the root document."),
-    )
-
-    version_label = models.CharField(
-        _("version label"),
-        max_length=64,
-        blank=True,
-        null=True,
-        help_text=_("Optional short label for a document version."),
-    )
-
     class Meta:
         ordering = ("-created",)
         verbose_name = _("document")
         verbose_name_plural = _("documents")
-        constraints = [
-            models.UniqueConstraint(
-                fields=["root_document", "version_index"],
-                condition=models.Q(
-                    root_document__isnull=False,
-                    version_index__isnull=False,
-                ),
-                name="documents_document_root_version_index_uniq",
-            ),
-        ]
 
     def __str__(self) -> str:
         created = self.created.isoformat()
@@ -360,45 +492,6 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
         if self.title:
             res += f" {self.title}"
         return res
-
-    def get_effective_content(self) -> str | None:
-        """
-        Returns the effective content for the document.
-
-        For root documents, this is the latest version's content when available.
-        For version documents, this is always the document's own content.
-        If the queryset already annotated ``effective_content``, that value is used.
-        """
-        if hasattr(self, "effective_content"):
-            return getattr(self, "effective_content")
-
-        if self.root_document_id is not None or self.pk is None:
-            return self.content
-
-        prefetched_cache = getattr(self, "_prefetched_objects_cache", None)
-        prefetched_versions = (
-            prefetched_cache.get("versions")
-            if isinstance(prefetched_cache, dict)
-            else None
-        )
-        if prefetched_versions is not None:
-            # Empty list means prefetch ran and found no versions — use own content.
-            if not prefetched_versions:
-                return self.content
-            latest_prefetched = max(prefetched_versions, key=lambda doc: doc.id)
-            return latest_prefetched.content
-
-        latest_version_content = (
-            Document.objects.filter(root_document=self)
-            .order_by("-id")
-            .values_list("content", flat=True)
-            .first()
-        )
-        return (
-            latest_version_content
-            if latest_version_content is not None
-            else self.content
-        )
 
     @property
     def suggestion_content(self):
@@ -412,21 +505,12 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
         This improves processing speed for large documents while keeping
         enough context for accurate suggestions.
         """
-        effective_content = self.get_effective_content()
-        if not effective_content or len(effective_content) <= 1200000:
-            return effective_content
-        else:
-            # Use 80% from the start and 20% from the end
-            # to preserve both opening and closing context.
-            head_len = 800000
-            tail_len = 200000
-
-            return " ".join(
-                (
-                    effective_content[:head_len],
-                    effective_content[-tail_len:],
-                ),
-            )
+        content = self.content
+        if not content or len(content) <= 1200000:
+            return content
+        head_len = 800000
+        tail_len = 200000
+        return " ".join((content[:head_len], content[-tail_len:]))
 
     @property
     def source_path(self) -> Path:
@@ -500,19 +584,6 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
 
         tags_to_add = self.tags.model.objects.filter(id__in=tag_ids)
         self.tags.add(*tags_to_add)
-
-    def delete(
-        self,
-        *args,
-        **kwargs,
-    ):
-        # If deleting a root document, move all its versions to trash as well.
-        if self.root_document_id is None:
-            Document.objects.filter(root_document=self).delete()
-        return super().delete(
-            *args,
-            **kwargs,
-        )
 
 
 class SavedView(ModelWithOwner):
