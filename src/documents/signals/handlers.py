@@ -654,16 +654,6 @@ def update_filename_and_move_files(
                 root=settings.ARCHIVE_DIR,
             )
 
-    # Keep version files in sync with root
-    if instance.root_document_id is None:
-        for version_doc in Document.objects.filter(root_document_id=instance.pk).only(
-            "pk",
-        ):
-            update_filename_and_move_files(
-                Document,
-                version_doc,
-            )
-
 
 @shared_task
 def process_cf_select_update(custom_field: CustomField) -> None:
@@ -869,13 +859,6 @@ def run_workflows(
     """
 
     use_overrides = overrides is not None
-
-    if isinstance(document, Document) and document.root_document_id is not None:
-        logger.debug(
-            "Skipping workflow execution for version document %s",
-            document.pk,
-        )
-        return None
 
     if original_file is None:
         original_file = (

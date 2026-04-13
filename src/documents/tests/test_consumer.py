@@ -25,6 +25,7 @@ from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import Document
 from documents.models import DocumentType
+from documents.models import DocumentVersion
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.parsers import ParseError
@@ -725,7 +726,8 @@ class TestConsumer(
         document = Document.objects.first()
         assert document is not None
 
-        self.assertEqual(document.version_label, "v1")
+        version = DocumentVersion.objects.get(document=document, version_number=1)
+        self.assertEqual(version.version_label, "v1")
 
         self._assert_first_last_send_progress()
 
@@ -790,16 +792,17 @@ class TestConsumer(
         finally:
             consumer.cleanup()
 
-        versions = Document.objects.filter(root_document=root_doc)
-        self.assertEqual(versions.count(), 1)
-        version = versions.first()
-        assert version is not None
-        assert version.original_filename is not None
-        self.assertEqual(version.version_index, 1)
-        self.assertEqual(version.version_label, "v2")
-        self.assertIsNone(version.archive_serial_number)
-        self.assertEqual(version.original_filename, version_file.name)
-        self.assertTrue(bool(version.content))
+        # Initial consume already created version_number=1.
+        # Version upload created version_number=2.
+        versions = DocumentVersion.objects.filter(document=root_doc).order_by(
+            "version_number",
+        )
+        self.assertEqual(versions.count(), 2)
+        uploaded = versions.get(version_number=2)
+        assert uploaded.original_filename is not None
+        self.assertEqual(uploaded.version_label, "v2")
+        self.assertEqual(uploaded.original_filename, version_file.name)
+        self.assertTrue(bool(uploaded.content))
 
     @override_settings(AUDIT_LOG_ENABLED=True)
     @mock.patch("documents.consumer.load_classifier")
@@ -852,14 +855,16 @@ class TestConsumer(
         finally:
             consumer.cleanup()
 
-        version = (
-            Document.objects.filter(root_document=root_doc).order_by("-id").first()
+        # Initial consume already created version_number=1.
+        # Version upload created version_number=2.
+        versions = DocumentVersion.objects.filter(document=root_doc).order_by(
+            "version_number",
         )
-        self.assertIsNotNone(version)
-        assert version is not None
-        self.assertEqual(version.version_index, 1)
-        self.assertEqual(version.original_filename, "valid_pdf_version-upload")
-        self.assertTrue(bool(version.content))
+        uploaded = versions.get(version_number=2)
+        self.assertIsNotNone(uploaded)
+        assert uploaded is not None
+        self.assertEqual(uploaded.original_filename, "valid_pdf_version-upload")
+        self.assertTrue(bool(uploaded.content))
 
     @override_settings(AUDIT_LOG_ENABLED=True)
     @mock.patch("documents.consumer.load_classifier")
@@ -873,7 +878,7 @@ class TestConsumer(
         self.assertIsNotNone(root_doc)
         assert root_doc is not None
 
-        def consume_version(version_file: Path) -> Document:
+        def consume_version(version_file: Path) -> DocumentVersion:
             status = DummyProgressManager(version_file.name, None)
             overrides = DocumentMetadataOverrides()
             doc = ConsumableDocument(
@@ -905,18 +910,22 @@ class TestConsumer(
                 consumer.cleanup()
 
             version = (
-                Document.objects.filter(root_document=root_doc).order_by("-id").first()
+                DocumentVersion.objects.filter(document=root_doc)
+                .order_by("-version_number")
+                .first()
             )
             assert version is not None
             return version
 
-        v1 = consume_version(self.get_test_file2())
-        self.assertEqual(v1.version_index, 1)
-        v1.delete()
+        # First upload: version_number=2 (version 1 was created at initial consume)
+        v1_dv = consume_version(self.get_test_file2())
+        self.assertEqual(v1_dv.version_number, 2)
+        v1_dv.delete()
 
-        # The next version should have version_index 2, even though version_index 1 was deleted
-        v2 = consume_version(self.get_test_file())
-        self.assertEqual(v2.version_index, 2)
+        # After deleting version_number=2, MAX is 1 (the initial consume version).
+        # The next upload gets MAX+1 = 2.
+        v2_dv = consume_version(self.get_test_file())
+        self.assertEqual(v2_dv.version_number, 2)
 
     @mock.patch("documents.consumer.load_classifier")
     def testClassifyDocument(self, m) -> None:

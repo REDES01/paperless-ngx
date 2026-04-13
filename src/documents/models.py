@@ -515,6 +515,15 @@ class Document(DocumentBase, SoftDeleteModel, ModelWithOwner):  # type: ignore[d
     def created_date(self):
         return self.created
 
+    def get_effective_content(self) -> str:
+        """Return the content to use for search indexing and matching.
+
+        This is a compatibility shim; since DocumentVersion now holds per-version
+        content, the Document.content cache field already reflects the latest version.
+        Task 9 will remove the callers of this method.
+        """
+        return self.content
+
     def add_nested_tags(self, tags) -> None:
         tag_ids = set()
         for tag in tags:

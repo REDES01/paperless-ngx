@@ -11,6 +11,7 @@ from typing import Final
 import magic
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.db import connection
 from django.db import transaction
 from django.db.models import Max
 from django.db.models import Q
@@ -30,6 +31,7 @@ from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import DocumentType
+from documents.models import DocumentVersion
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.models import WorkflowTrigger
@@ -250,39 +252,41 @@ class ConsumerPlugin(
         text: str | None,
         page_count: int | None,
         mime_type: str,
-    ) -> Document:
-        self.log.debug("Saving record for updated version to database")
-        root_doc_frozen = Document.objects.select_for_update().get(pk=root_doc.pk)
-        next_version_index = (
-            Document.global_objects.filter(
-                root_document_id=root_doc_frozen.pk,
-            ).aggregate(
-                max_index=Max("version_index"),
-            )["max_index"]
+    ) -> DocumentVersion:
+        self.log.debug("Saving record for new version to database")
+        # SQLite uses BEGIN EXCLUSIVE on write inside transaction.atomic(), which gives
+        # serializable isolation — SELECT FOR UPDATE is both unnecessary and unsupported.
+        # PostgreSQL and MariaDB need the explicit row lock to prevent concurrent version
+        # number races; the lock is held for the duration of the outer transaction.
+        if connection.vendor != "sqlite":
+            DocumentVersion.objects.select_for_update().filter(
+                document=root_doc,
+            ).exists()
+        next_number = (
+            DocumentVersion.objects.filter(document=root_doc).aggregate(
+                max_num=Max("version_number"),
+            )["max_num"]
             or 0
-        )
+        ) + 1
+
         file_for_checksum = (
             self.unmodified_original
             if self.unmodified_original is not None
             else self.working_copy
         )
-        version_doc = Document(
-            root_document=root_doc_frozen,
-            version_index=next_version_index + 1,
+        new_version = DocumentVersion(
+            document=root_doc,
+            version_number=next_number,
             checksum=compute_checksum(file_for_checksum),
             content=text or "",
             page_count=page_count,
             mime_type=mime_type,
             original_filename=self.filename,
-            owner_id=root_doc_frozen.owner_id,
-            created=root_doc_frozen.created,
-            title=root_doc_frozen.title,
             added=timezone.now(),
-            modified=timezone.now(),
         )
         if self.metadata.version_label is not None:
-            version_doc.version_label = self.metadata.version_label
-        return version_doc
+            new_version.version_label = self.metadata.version_label
+        return new_version
 
     def run_pre_consume_script(self) -> None:
         """
@@ -586,21 +590,17 @@ class ConsumerPlugin(
                     with transaction.atomic():
                         # store the document.
                         if self.input_doc.root_document_id:
-                            # If this is a new version of an existing document, we need
-                            # to make sure we're not creating a new document, but updating
-                            # the existing one.
                             root_doc = Document.objects.get(
                                 pk=self.input_doc.root_document_id,
                             )
-                            original_document = self._create_version_from_root(
+                            new_version = self._create_version_from_root(
                                 root_doc,
                                 text=text,
                                 page_count=page_count,
                                 mime_type=mime_type,
                             )
-                            actor = None
 
-                            # Save the new version, potentially creating an audit log entry for the version addition if enabled.
+                            actor = None
                             if (
                                 settings.AUDIT_LOG_ENABLED
                                 and self.metadata.actor_id is not None
@@ -608,37 +608,33 @@ class ConsumerPlugin(
                                 actor = User.objects.filter(
                                     pk=self.metadata.actor_id,
                                 ).first()
-                                if actor is not None:
-                                    from auditlog.context import (  # type: ignore[import-untyped]
-                                        set_actor,
-                                    )
 
-                                    with set_actor(actor):
-                                        original_document.save()
-                                else:
-                                    original_document.save()
+                            if actor is not None:
+                                from auditlog.context import (
+                                    set_actor,  # type: ignore[import-untyped]
+                                )
+
+                                with set_actor(actor):
+                                    new_version.save()
                             else:
-                                original_document.save()
+                                new_version.save()
 
-                            # Create a log entry for the version addition, if enabled
                             if settings.AUDIT_LOG_ENABLED:
-                                from auditlog.models import (  # type: ignore[import-untyped]
-                                    LogEntry,
+                                from auditlog.models import (
+                                    LogEntry,  # type: ignore[import-untyped]
                                 )
 
                                 LogEntry.objects.log_create(
                                     instance=root_doc,
-                                    changes={
-                                        "Version Added": ["None", original_document.id],
-                                    },
+                                    changes={"Version Added": ["None", new_version.pk]},
                                     action=LogEntry.Action.UPDATE,
                                     actor=actor,
                                     additional_data={
                                         "reason": "Version added",
-                                        "version_id": original_document.id,
+                                        "version_id": new_version.pk,
                                     },
                                 )
-                            document = original_document
+                            document = root_doc
                         else:
                             document = self._store(
                                 text=text,
@@ -666,71 +662,179 @@ class ConsumerPlugin(
 
                         # After everything is in the database, copy the files into
                         # place. If this fails, we'll also rollback the transaction.
-                        with FileLock(settings.MEDIA_LOCK):
-                            generated_filename = generate_unique_filename(document)
-                            if (
-                                len(str(generated_filename))
-                                > Document.MAX_STORED_FILENAME_LENGTH
-                            ):
-                                self.log.warning(
-                                    "Generated source filename exceeds db path limit, falling back to default naming",
-                                )
-                                generated_filename = generate_filename(
-                                    document,
-                                    use_format=False,
-                                )
-                            document.filename = generated_filename
-                            create_source_path_directory(document.source_path)
-
-                            self._write(
-                                self.unmodified_original
-                                if self.unmodified_original is not None
-                                else self.working_copy,
-                                document.source_path,
-                            )
-
-                            self._write(
-                                thumbnail,
-                                document.thumbnail_path,
-                            )
-
-                            if archive_path and Path(archive_path).is_file():
-                                generated_archive_filename = generate_unique_filename(
-                                    document,
-                                    archive_filename=True,
+                        if self.input_doc.root_document_id:
+                            with FileLock(settings.MEDIA_LOCK):
+                                generated_filename = generate_unique_filename(
+                                    root_doc,
+                                    new_version,
                                 )
                                 if (
-                                    len(str(generated_archive_filename))
+                                    len(str(generated_filename))
+                                    > DocumentVersion.MAX_STORED_FILENAME_LENGTH
+                                ):
+                                    self.log.warning(
+                                        "Generated source filename exceeds db path limit, falling back to default naming",
+                                    )
+                                    generated_filename = generate_filename(
+                                        root_doc,
+                                        new_version,
+                                        use_format=False,
+                                    )
+                                new_version.filename = generated_filename
+                                create_source_path_directory(new_version.source_path)
+                                self._write(
+                                    self.unmodified_original
+                                    if self.unmodified_original is not None
+                                    else self.working_copy,
+                                    new_version.source_path,
+                                )
+                                self._write(thumbnail, new_version.thumbnail_path)
+
+                                if archive_path and Path(archive_path).is_file():
+                                    generated_archive_filename = (
+                                        generate_unique_filename(
+                                            root_doc,
+                                            new_version,
+                                            archive_filename=True,
+                                        )
+                                    )
+                                    if (
+                                        len(str(generated_archive_filename))
+                                        > DocumentVersion.MAX_STORED_FILENAME_LENGTH
+                                    ):
+                                        generated_archive_filename = generate_filename(
+                                            root_doc,
+                                            new_version,
+                                            archive_filename=True,
+                                            use_format=False,
+                                        )
+                                    new_version.archive_filename = (
+                                        generated_archive_filename
+                                    )
+                                    create_source_path_directory(
+                                        new_version.archive_path,
+                                    )
+                                    self._write(archive_path, new_version.archive_path)
+                                    new_version.archive_checksum = compute_checksum(
+                                        new_version.archive_path,
+                                    )
+
+                            new_version.save(
+                                update_fields=[
+                                    "filename",
+                                    "archive_filename",
+                                    "archive_checksum",
+                                ],
+                            )
+
+                            # Sync all Document cache fields from the new version so search/matching
+                            # and file-serving remain correct without any subquery.
+                            root_doc.content = new_version.content
+                            root_doc.checksum = new_version.checksum
+                            root_doc.archive_checksum = new_version.archive_checksum
+                            root_doc.filename = new_version.filename
+                            root_doc.archive_filename = new_version.archive_filename
+                            root_doc.mime_type = new_version.mime_type
+                            root_doc.page_count = new_version.page_count
+                            root_doc.original_filename = new_version.original_filename
+                            root_doc.modified = timezone.now()
+                            root_doc.save(
+                                update_fields=[
+                                    "content",
+                                    "checksum",
+                                    "archive_checksum",
+                                    "filename",
+                                    "archive_filename",
+                                    "mime_type",
+                                    "page_count",
+                                    "original_filename",
+                                    "modified",
+                                ],
+                            )
+
+                            document_updated.send(
+                                sender=self.__class__,
+                                document=root_doc,
+                            )
+                        else:
+                            with FileLock(settings.MEDIA_LOCK):
+                                generated_filename = generate_unique_filename(document)
+                                if (
+                                    len(str(generated_filename))
                                     > Document.MAX_STORED_FILENAME_LENGTH
                                 ):
                                     self.log.warning(
-                                        "Generated archive filename exceeds db path limit, falling back to default naming",
+                                        "Generated source filename exceeds db path limit, falling back to default naming",
                                     )
-                                    generated_archive_filename = generate_filename(
+                                    generated_filename = generate_filename(
                                         document,
-                                        archive_filename=True,
                                         use_format=False,
                                     )
-                                document.archive_filename = generated_archive_filename
-                                create_source_path_directory(document.archive_path)
+                                document.filename = generated_filename
+                                create_source_path_directory(document.source_path)
+
                                 self._write(
-                                    archive_path,
-                                    document.archive_path,
+                                    self.unmodified_original
+                                    if self.unmodified_original is not None
+                                    else self.working_copy,
+                                    document.source_path,
                                 )
 
-                                document.archive_checksum = compute_checksum(
-                                    document.archive_path,
+                                self._write(
+                                    thumbnail,
+                                    document.thumbnail_path,
                                 )
 
-                        # Don't save with the lock active. Saving will cause the file
-                        # renaming logic to acquire the lock as well.
-                        # This triggers things like file renaming
-                        document.save()
+                                if archive_path and Path(archive_path).is_file():
+                                    generated_archive_filename = (
+                                        generate_unique_filename(
+                                            document,
+                                            archive_filename=True,
+                                        )
+                                    )
+                                    if (
+                                        len(str(generated_archive_filename))
+                                        > Document.MAX_STORED_FILENAME_LENGTH
+                                    ):
+                                        self.log.warning(
+                                            "Generated archive filename exceeds db path limit, falling back to default naming",
+                                        )
+                                        generated_archive_filename = generate_filename(
+                                            document,
+                                            archive_filename=True,
+                                            use_format=False,
+                                        )
+                                    document.archive_filename = (
+                                        generated_archive_filename
+                                    )
+                                    create_source_path_directory(document.archive_path)
+                                    self._write(
+                                        archive_path,
+                                        document.archive_path,
+                                    )
 
-                        if document.root_document_id:
-                            document_updated.send(
-                                sender=self.__class__,
-                                document=document.root_document,
+                                    document.archive_checksum = compute_checksum(
+                                        document.archive_path,
+                                    )
+
+                            # Don't save with the lock active. Saving will cause the file
+                            # renaming logic to acquire the lock as well.
+                            # This triggers things like file renaming
+                            document.save()
+
+                            DocumentVersion.objects.create(
+                                document=document,
+                                version_number=1,
+                                checksum=document.checksum,
+                                archive_checksum=document.archive_checksum,
+                                content=document.content,
+                                page_count=document.page_count,
+                                mime_type=document.mime_type,
+                                original_filename=document.original_filename,
+                                filename=document.filename,
+                                archive_filename=document.archive_filename,
+                                added=document.added,
+                                version_label=self.metadata.version_label,
                             )
 
                         # Delete the file only if it was successfully consumed
@@ -895,9 +999,6 @@ class ConsumerPlugin(
 
         if self.metadata.asn is not None:
             document.archive_serial_number = self.metadata.asn
-
-        if self.metadata.version_label is not None:
-            document.version_label = self.metadata.version_label
 
         if self.metadata.owner_id:
             document.owner = User.objects.get(
