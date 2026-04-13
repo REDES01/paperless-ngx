@@ -1,91 +1,86 @@
+from __future__ import annotations
+
 from types import SimpleNamespace
-from unittest import mock
 
-from django.test import TestCase
+import pytest
 
-from documents.conditionals import metadata_etag
-from documents.conditionals import preview_etag
-from documents.conditionals import thumbnail_last_modified
-from documents.models import Document
-from documents.tests.utils import DirectoriesMixin
-from documents.versioning import resolve_effective_document_by_pk
+from documents.tests.factories import DocumentFactory
+from documents.tests.factories import DocumentVersionFactory
+from documents.versioning import VersionResolutionError
+from documents.versioning import get_latest_version
+from documents.versioning import get_version_by_pk
+from documents.versioning import resolve_requested_version
 
 
-class TestConditionals(DirectoriesMixin, TestCase):
-    def test_metadata_etag_uses_latest_version_for_root_request(self) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root-checksum",
-            archive_checksum="root-archive",
-            mime_type="application/pdf",
-        )
-        latest = Document.objects.create(
-            title="v1",
-            checksum="version-checksum",
-            archive_checksum="version-archive",
-            mime_type="application/pdf",
-            root_document=root,
-        )
+@pytest.mark.django_db
+class TestGetLatestVersion:
+    def test_returns_highest_version_number(self) -> None:
+        doc = DocumentFactory()
+        DocumentVersionFactory(document=doc, version_number=1)
+        DocumentVersionFactory(document=doc, version_number=2)
+        v3 = DocumentVersionFactory(document=doc, version_number=3)
+        result = get_latest_version(doc)
+        assert result is not None
+        assert result.pk == v3.pk
+
+    def test_returns_none_when_no_versions(self) -> None:
+        doc = DocumentFactory()
+        assert get_latest_version(doc) is None
+
+
+@pytest.mark.django_db
+class TestGetVersionByPk:
+    def test_returns_version_belonging_to_document(self) -> None:
+        doc = DocumentFactory()
+        v = DocumentVersionFactory(document=doc, version_number=1)
+        result = get_version_by_pk(doc, v.pk)
+        assert result is not None
+        assert result.pk == v.pk
+
+    def test_returns_none_for_unrelated_version(self) -> None:
+        doc_a = DocumentFactory()
+        doc_b = DocumentFactory()
+        v_b = DocumentVersionFactory(document=doc_b, version_number=1)
+        assert get_version_by_pk(doc_a, v_b.pk) is None
+
+    def test_returns_none_for_nonexistent_pk(self) -> None:
+        doc = DocumentFactory()
+        assert get_version_by_pk(doc, 999999) is None
+
+
+@pytest.mark.django_db
+class TestResolveRequestedVersion:
+    def test_no_version_param_returns_latest(self) -> None:
+        doc = DocumentFactory()
+        DocumentVersionFactory(document=doc, version_number=1)
+        v2 = DocumentVersionFactory(document=doc, version_number=2)
         request = SimpleNamespace(query_params={})
+        result = resolve_requested_version(doc, request)
+        assert result.version is not None
+        assert result.version.pk == v2.pk
+        assert result.error is None
 
-        self.assertEqual(metadata_etag(request, root.id), latest.checksum)
-        self.assertEqual(preview_etag(request, root.id), latest.archive_checksum)
+    def test_explicit_version_param_returns_that_version(self) -> None:
+        doc = DocumentFactory()
+        v1 = DocumentVersionFactory(document=doc, version_number=1)
+        DocumentVersionFactory(document=doc, version_number=2)
+        request = SimpleNamespace(query_params={"version": str(v1.pk)})
+        result = resolve_requested_version(doc, request)
+        assert result.version is not None
+        assert result.version.pk == v1.pk
 
-    def test_resolve_effective_doc_returns_none_for_invalid_or_unrelated_version(
-        self,
-    ) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
-            mime_type="application/pdf",
-        )
-        other_root = Document.objects.create(
-            title="other",
-            checksum="other",
-            mime_type="application/pdf",
-        )
-        other_version = Document.objects.create(
-            title="other-v1",
-            checksum="other-v1",
-            mime_type="application/pdf",
-            root_document=other_root,
-        )
+    def test_invalid_version_param_returns_error(self) -> None:
+        doc = DocumentFactory()
+        request = SimpleNamespace(query_params={"version": "notanint"})
+        result = resolve_requested_version(doc, request)
+        assert result.version is None
+        assert result.error == VersionResolutionError.INVALID
 
-        invalid_request = SimpleNamespace(query_params={"version": "not-a-number"})
-        unrelated_request = SimpleNamespace(
-            query_params={"version": str(other_version.id)},
-        )
-
-        self.assertIsNone(
-            resolve_effective_document_by_pk(root.id, invalid_request).document,
-        )
-        self.assertIsNone(
-            resolve_effective_document_by_pk(root.id, unrelated_request).document,
-        )
-
-    def test_thumbnail_last_modified_uses_effective_document_for_cache_key(
-        self,
-    ) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
-            mime_type="application/pdf",
-        )
-        latest = Document.objects.create(
-            title="v2",
-            checksum="v2",
-            mime_type="application/pdf",
-            root_document=root,
-        )
-        latest.thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-        latest.thumbnail_path.write_bytes(b"thumb")
-
-        request = SimpleNamespace(query_params={})
-        with mock.patch(
-            "documents.conditionals.get_thumbnail_modified_key",
-            return_value="thumb-modified-key",
-        ) as get_thumb_key:
-            result = thumbnail_last_modified(request, root.id)
-
-        self.assertIsNotNone(result)
-        get_thumb_key.assert_called_once_with(latest.id)
+    def test_unrelated_version_id_returns_not_found(self) -> None:
+        doc_a = DocumentFactory()
+        doc_b = DocumentFactory()
+        v_b = DocumentVersionFactory(document=doc_b, version_number=1)
+        request = SimpleNamespace(query_params={"version": str(v_b.pk)})
+        result = resolve_requested_version(doc_a, request)
+        assert result.version is None
+        assert result.error == VersionResolutionError.NOT_FOUND

@@ -10,6 +10,7 @@ from factory.django import DjangoModelFactory
 from documents.models import Correspondent
 from documents.models import Document
 from documents.models import DocumentType
+from documents.models import DocumentVersion
 from documents.models import MatchingModel
 from documents.models import StoragePath
 from documents.models import Tag
@@ -65,3 +66,13 @@ class DocumentFactory(DjangoModelFactory):
     correspondent = None
     document_type = None
     storage_path = None
+
+
+class DocumentVersionFactory(DjangoModelFactory):
+    class Meta:
+        model = DocumentVersion
+
+    document = factory.SubFactory(DocumentFactory)
+    version_number = factory.Sequence(lambda n: n + 1)
+    checksum = factory.Faker("sha256")
+    mime_type = "application/pdf"
