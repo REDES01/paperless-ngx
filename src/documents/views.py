@@ -31,17 +31,13 @@ from django.db.migrations.loader import MigrationLoader
 from django.db.migrations.recorder import MigrationRecorder
 from django.db.models import Case
 from django.db.models import Count
-from django.db.models import F
 from django.db.models import IntegerField
 from django.db.models import Max
 from django.db.models import Model
-from django.db.models import OuterRef
 from django.db.models import Prefetch
 from django.db.models import Q
-from django.db.models import Subquery
 from django.db.models import Sum
 from django.db.models import When
-from django.db.models.functions import Coalesce
 from django.db.models.functions import Lower
 from django.db.models.manager import Manager
 from django.http import FileResponse
@@ -146,6 +142,7 @@ from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import DocumentType
+from documents.models import DocumentVersion
 from documents.models import Note
 from documents.models import PaperlessTask
 from documents.models import SavedView
@@ -217,10 +214,8 @@ from documents.tasks import train_classifier
 from documents.tasks import update_document_parent_tags
 from documents.utils import get_boolean
 from documents.versioning import VersionResolutionError
-from documents.versioning import get_latest_version_for_root
-from documents.versioning import get_request_version_param
-from documents.versioning import get_root_document
-from documents.versioning import resolve_requested_version_for_root
+from documents.versioning import get_latest_version
+from documents.versioning import resolve_requested_version
 from paperless import version
 from paperless.celery import app as celery_app
 from paperless.config import AIConfig
@@ -822,7 +817,7 @@ class DocumentViewSet(
         ObjectOwnedOrGrantedPermissionsFilter,
     )
     filterset_class = DocumentFilterSet
-    search_fields = ("title", "correspondent__name", "effective_content")
+    search_fields = ("title", "correspondent__name", "content")
     ordering_fields = (
         "id",
         "title",
@@ -895,27 +890,21 @@ class DocumentViewSet(
         }
 
     def get_queryset(self):
-        latest_version_content = Subquery(
-            Document.objects.filter(root_document=OuterRef("pk"))
-            .order_by("-id")
-            .values("content")[:1],
-        )
         return (
-            Document.objects.filter(root_document__isnull=True)
-            .distinct()
+            Document.objects.distinct()
             .order_by("-created")
-            .annotate(effective_content=Coalesce(latest_version_content, F("content")))
             .annotate(num_notes=Count("notes"))
             .select_related("correspondent", "storage_path", "document_type", "owner")
             .prefetch_related(
                 Prefetch(
                     "versions",
-                    queryset=Document.objects.only(
+                    queryset=DocumentVersion.objects.only(
                         "id",
                         "added",
                         "checksum",
                         "version_label",
-                        "root_document_id",
+                        "version_number",
+                        "document_id",
                     ),
                 ),
                 "tags",
@@ -943,35 +932,6 @@ class DocumentViewSet(
         )
         return super().get_serializer(*args, **kwargs)
 
-    @extend_schema(
-        operation_id="documents_root",
-        responses=inline_serializer(
-            name="DocumentRootResponse",
-            fields={
-                "root_id": serializers.IntegerField(),
-            },
-        ),
-    )
-    @action(methods=["get"], detail=True, url_path="root")
-    def root(self, request, pk=None):
-        try:
-            doc = Document.global_objects.select_related(
-                "owner",
-                "root_document",
-            ).get(pk=pk)
-        except Document.DoesNotExist:
-            raise Http404
-
-        root_doc = get_root_document(doc)
-        if request.user is not None and not has_perms_owner_aware(
-            request.user,
-            "view_document",
-            root_doc,
-        ):
-            return HttpResponseForbidden("Insufficient permissions")
-
-        return Response({"root_id": root_doc.id})
-
     def retrieve(
         self,
         request: Request,
@@ -997,7 +957,7 @@ class DocumentViewSet(
         content_doc = (
             self._resolve_file_doc(root_doc, request)
             if "version" in request.query_params
-            else get_latest_version_for_root(root_doc)
+            else get_latest_version(root_doc)
         )
         content_updated = "content" in request.data
         updated_content = request.data.get("content") if content_updated else None
@@ -1083,30 +1043,20 @@ class DocumentViewSet(
             and request.query_params["original"] == "true"
         )
 
-    def _resolve_file_doc(self, root_doc: Document, request):
-        version_requested = get_request_version_param(request) is not None
-        resolution = resolve_requested_version_for_root(
-            root_doc,
-            request,
-            include_deleted=version_requested,
-        )
+    def _resolve_file_doc(self, root_doc: Document, request) -> "DocumentVersion":
+        resolution = resolve_requested_version(root_doc, request)
         if resolution.error == VersionResolutionError.INVALID:
             raise NotFound("Invalid version parameter")
-        if resolution.document is None:
+        if resolution.version is None:
             raise Http404
-        return resolution.document
+        return resolution.version
 
     def _get_effective_file_doc(
         self,
         request_doc: Document,
         root_doc: Document,
         request: Request,
-    ) -> Document:
-        if (
-            request_doc.root_document_id is not None
-            and get_request_version_param(request) is None
-        ):
-            return request_doc
+    ) -> "DocumentVersion":
         return self._resolve_file_doc(root_doc, request)
 
     def _resolve_request_and_root_doc(
@@ -1118,24 +1068,17 @@ class DocumentViewSet(
     ) -> tuple[Document, Document] | HttpResponseForbidden:
         manager = Document.global_objects if include_deleted else Document.objects
         try:
-            request_doc = manager.select_related(
-                "owner",
-                "root_document",
-            ).get(id=pk)
+            root_doc = manager.select_related("owner").get(id=pk)
         except Document.DoesNotExist:
             raise Http404
 
-        root_doc = get_root_document(
-            request_doc,
-            include_deleted=include_deleted,
-        )
         if request.user is not None and not has_perms_owner_aware(
             request.user,
             "view_document",
             root_doc,
         ):
             return HttpResponseForbidden("Insufficient permissions")
-        return request_doc, root_doc
+        return root_doc, root_doc
 
     def file_response(self, pk, request, disposition):
         resolved = self._resolve_request_and_root_doc(
@@ -1704,11 +1647,7 @@ class DocumentViewSet(
         serializer.is_valid(raise_exception=True)
 
         try:
-            request_doc = Document.objects.select_related(
-                "owner",
-                "root_document",
-            ).get(pk=pk)
-            root_doc = get_root_document(request_doc)
+            root_doc = Document.objects.select_related("owner").get(pk=pk)
             if request.user is not None and not has_perms_owner_aware(
                 request.user,
                 "change_document",
@@ -1762,28 +1701,15 @@ class DocumentViewSet(
 
     def _get_root_doc_for_version_action(self, pk) -> Document:
         try:
-            root_doc = Document.objects.select_related(
-                "owner",
-                "root_document",
-            ).get(pk=pk)
+            return Document.objects.select_related("owner").get(pk=pk)
         except Document.DoesNotExist:
             raise Http404
-        return get_root_document(root_doc)
 
-    def _get_version_doc_for_root(self, root_doc: Document, version_id) -> Document:
+    def _get_version_for_doc(self, doc: Document, version_pk: int) -> "DocumentVersion":
         try:
-            version_doc = Document.objects.select_related("owner").get(
-                pk=version_id,
-            )
-        except Document.DoesNotExist:
+            return DocumentVersion.objects.get(pk=version_pk, document=doc)
+        except DocumentVersion.DoesNotExist:
             raise Http404
-
-        if (
-            version_doc.id != root_doc.id
-            and version_doc.root_document_id != root_doc.id
-        ):
-            raise Http404
-        return version_doc
 
     @extend_schema(
         operation_id="documents_delete_version",
@@ -1798,7 +1724,7 @@ class DocumentViewSet(
             name="DeleteDocumentVersionResult",
             fields={
                 "result": serializers.CharField(),
-                "current_version_id": serializers.IntegerField(),
+                "current_version_id": serializers.IntegerField(allow_null=True),
             },
         ),
     )
@@ -1809,7 +1735,6 @@ class DocumentViewSet(
     )
     def delete_version(self, request, pk=None, version_id=None):
         root_doc = self._get_root_doc_for_version_action(pk)
-
         if request.user is not None and not has_perms_owner_aware(
             request.user,
             "delete_document",
@@ -1817,51 +1742,82 @@ class DocumentViewSet(
         ):
             return HttpResponseForbidden("Insufficient permissions")
 
-        version_doc = self._get_version_doc_for_root(root_doc, version_id)
+        version = self._get_version_for_doc(root_doc, int(version_id))
 
-        if version_doc.id == root_doc.id:
+        if DocumentVersion.objects.filter(document=root_doc).count() <= 1:
             return HttpResponseBadRequest(
-                "Cannot delete the root/original version. Delete the document instead.",
+                "Cannot delete the only remaining version. Delete the document instead.",
             )
 
         from documents.search import get_backend
 
         _backend = get_backend()
-        _backend.remove(version_doc.pk)
-        version_doc_id = version_doc.id
-        version_doc.delete()
+        deleted_pk = version.pk
+
+        # Capture whether this is the latest version before deleting.
+        was_latest = not DocumentVersion.objects.filter(
+            document=root_doc,
+            version_number__gt=version.version_number,
+        ).exists()
+        version.delete()
+
+        # Only sync Document cache fields if the deleted version was the latest.
+        if was_latest:
+            new_latest = (
+                DocumentVersion.objects.filter(document=root_doc)
+                .order_by("-version_number")
+                .first()
+            )
+            if new_latest is not None:
+                root_doc.content = new_latest.content
+                root_doc.checksum = new_latest.checksum
+                root_doc.archive_checksum = new_latest.archive_checksum
+                root_doc.filename = new_latest.filename
+                root_doc.archive_filename = new_latest.archive_filename
+                root_doc.mime_type = new_latest.mime_type
+                root_doc.page_count = new_latest.page_count
+                root_doc.original_filename = new_latest.original_filename
+                root_doc.modified = timezone.now()
+                root_doc.save(
+                    update_fields=[
+                        "content",
+                        "checksum",
+                        "archive_checksum",
+                        "filename",
+                        "archive_filename",
+                        "mime_type",
+                        "page_count",
+                        "original_filename",
+                        "modified",
+                    ],
+                )
+
         _backend.add_or_update(root_doc)
+
         if settings.AUDIT_LOG_ENABLED:
             actor = (
                 request.user if request.user and request.user.is_authenticated else None
             )
+            from auditlog.models import LogEntry
+
             LogEntry.objects.log_create(
                 instance=root_doc,
-                changes={
-                    "Version Deleted": ["None", version_doc_id],
-                },
+                changes={"Version Deleted": ["None", deleted_pk]},
                 action=LogEntry.Action.UPDATE,
                 actor=actor,
-                additional_data={
-                    "reason": "Version deleted",
-                    "version_id": version_doc_id,
-                },
+                additional_data={"reason": "Version deleted", "version_id": deleted_pk},
             )
 
         current = (
-            Document.objects.filter(Q(id=root_doc.id) | Q(root_document=root_doc))
-            .order_by("-id")
+            DocumentVersion.objects.filter(document=root_doc)
+            .order_by("-version_number")
             .first()
         )
-
-        document_updated.send(
-            sender=self.__class__,
-            document=root_doc,
-        )
+        document_updated.send(sender=self.__class__, document=root_doc)
         return Response(
             {
                 "result": "OK",
-                "current_version_id": current.id if current else root_doc.id,
+                "current_version_id": current.pk if current else None,
             },
         )
 
@@ -1888,6 +1844,7 @@ class DocumentViewSet(
                     required=False,
                     allow_null=True,
                 ),
+                "version_number": serializers.IntegerField(read_only=True),
                 "is_root": serializers.BooleanField(),
             },
         ),
@@ -1905,40 +1862,37 @@ class DocumentViewSet(
         ):
             return HttpResponseForbidden("Insufficient permissions")
 
-        version_doc = self._get_version_doc_for_root(root_doc, version_id)
-        old_label = version_doc.version_label
-        version_doc.version_label = serializer.validated_data["version_label"]
-        version_doc.save(update_fields=["version_label"])
+        version = self._get_version_for_doc(root_doc, int(version_id))
+        old_label = version.version_label
+        version.version_label = serializer.validated_data["version_label"]
+        version.save(update_fields=["version_label"])
 
-        if settings.AUDIT_LOG_ENABLED and old_label != version_doc.version_label:
+        if settings.AUDIT_LOG_ENABLED and old_label != version.version_label:
             actor = (
                 request.user if request.user and request.user.is_authenticated else None
             )
+            from auditlog.models import LogEntry
+
             LogEntry.objects.log_create(
                 instance=root_doc,
-                changes={
-                    "Version Label": [old_label, version_doc.version_label],
-                },
+                changes={"Version Label": [old_label, version.version_label]},
                 action=LogEntry.Action.UPDATE,
                 actor=actor,
                 additional_data={
                     "reason": "Version label updated",
-                    "version_id": version_doc.id,
+                    "version_id": version.pk,
                 },
             )
 
-        document_updated.send(
-            sender=self.__class__,
-            document=root_doc,
-        )
-
+        document_updated.send(sender=self.__class__, document=root_doc)
         return Response(
             {
-                "id": version_doc.id,
-                "added": version_doc.added,
-                "version_label": version_doc.version_label,
-                "checksum": version_doc.checksum,
-                "is_root": version_doc.id == root_doc.id,
+                "id": version.pk,
+                "added": version.added,
+                "version_label": version.version_label,
+                "checksum": version.checksum,
+                "version_number": version.version_number,
+                "is_root": version.version_number == 1,
             },
         )
 
@@ -3935,7 +3889,7 @@ class SharedLinkView(View):
 
 def serve_file(
     *,
-    doc: Document,
+    doc: "Document | DocumentVersion",
     use_archive: bool,
     disposition: str,
     follow_formatting: bool = False,
