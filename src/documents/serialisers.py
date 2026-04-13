@@ -92,8 +92,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from django.db.models.query import QuerySet
-    from rest_framework.relations import ManyRelatedField
-    from rest_framework.relations import RelatedField
 
 
 logger = logging.getLogger("paperless.serializers")
@@ -948,7 +946,6 @@ def _get_viewable_duplicates(
     duplicates = Document.global_objects.filter(
         Q(checksum__in=checksums) | Q(archive_checksum__in=checksums),
     ).exclude(pk=document.pk)
-    duplicates = duplicates.filter(root_document__isnull=True)
     duplicates = duplicates.order_by("-created")
     allowed = get_objects_for_user_owner_aware(
         user,
@@ -966,11 +963,16 @@ class DuplicateDocumentSummarySerializer(serializers.Serializer):
 
 
 class DocumentVersionInfoSerializer(serializers.Serializer):
-    id = serializers.IntegerField()
-    added = serializers.DateTimeField()
-    version_label = serializers.CharField(required=False, allow_null=True)
-    checksum = serializers.CharField(required=False, allow_null=True)
-    is_root = serializers.BooleanField()
+    id = serializers.IntegerField(read_only=True)
+    added = serializers.DateTimeField(read_only=True)
+    version_label = serializers.CharField(
+        required=False,
+        allow_null=True,
+        read_only=True,
+    )
+    checksum = serializers.CharField(required=False, allow_null=True, read_only=True)
+    version_number = serializers.IntegerField(read_only=True)
+    is_root = serializers.BooleanField(read_only=True)
 
 
 class _DocumentVersionInfo(TypedDict):
@@ -978,6 +980,7 @@ class _DocumentVersionInfo(TypedDict):
     added: datetime
     version_label: str | None
     checksum: str | None
+    version_number: int
     is_root: bool
 
 
@@ -1001,9 +1004,6 @@ class DocumentSerializer(
     duplicate_documents = SerializerMethodField()
 
     notes = NotesSerializer(many=True, required=False, read_only=True)
-    root_document: RelatedField[Document, Document, Any] | ManyRelatedField = (
-        serializers.PrimaryKeyRelatedField(read_only=True)
-    )
     versions = SerializerMethodField()
 
     custom_fields = CustomFieldInstanceSerializer(
@@ -1039,41 +1039,41 @@ class DocumentSerializer(
         return list(duplicates.values("id", "title", "deleted_at"))
 
     @extend_schema_field(DocumentVersionInfoSerializer(many=True))
-    def get_versions(self, obj):
-        root_doc = obj if obj.root_document_id is None else obj.root_document
-        if root_doc is None:
-            return []
-
+    def get_versions(self, obj: Document):
         prefetched_cache = getattr(obj, "_prefetched_objects_cache", None)
-        prefetched_versions = (
+        prefetched = (
             prefetched_cache.get("versions")
             if isinstance(prefetched_cache, dict)
             else None
         )
 
-        versions: list[Document]
-        if prefetched_versions is not None:
-            versions = [*prefetched_versions, root_doc]
+        if prefetched is not None:
+            versions: list = list(prefetched)
         else:
-            versions_qs = Document.objects.filter(root_document=root_doc).only(
-                "id",
-                "added",
-                "checksum",
-                "version_label",
-            )
-            versions = [*versions_qs, root_doc]
+            from documents.models import DocumentVersion
 
-        def build_info(doc: Document) -> _DocumentVersionInfo:
+            versions = list(
+                DocumentVersion.objects.filter(document=obj).only(
+                    "id",
+                    "added",
+                    "checksum",
+                    "version_label",
+                    "version_number",
+                ),
+            )
+
+        def build_info(v: DocumentVersion) -> _DocumentVersionInfo:
             return {
-                "id": doc.id,
-                "added": doc.added,
-                "version_label": doc.version_label,
-                "checksum": doc.checksum,
-                "is_root": doc.id == root_doc.id,
+                "id": v.id,
+                "added": v.added,
+                "version_label": v.version_label,
+                "checksum": v.checksum,
+                "version_number": v.version_number,
+                "is_root": v.version_number == 1,
             }
 
-        info = [build_info(doc) for doc in versions]
-        info.sort(key=lambda item: item["id"], reverse=True)
+        info = [build_info(v) for v in versions]
+        info.sort(key=lambda item: item["version_number"], reverse=True)
         return info
 
     def get_original_file_name(self, obj) -> str | None:
@@ -1087,10 +1087,8 @@ class DocumentSerializer(
 
     def to_representation(self, instance):
         doc = super().to_representation(instance)
-        if "content" in self.fields and hasattr(instance, "effective_content"):
-            doc["content"] = getattr(instance, "effective_content") or ""
         if self.truncate_content and "content" in self.fields:
-            doc["content"] = doc.get("content")[0:550]
+            doc["content"] = (doc.get("content") or "")[0:550]
         return doc
 
     def to_internal_value(self, data):
@@ -1250,7 +1248,6 @@ class DocumentSerializer(
             "remove_inbox_tags",
             "page_count",
             "mime_type",
-            "root_document",
             "versions",
         )
         list_serializer_class = OwnedObjectListSerializer
