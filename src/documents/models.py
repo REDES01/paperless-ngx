@@ -155,7 +155,93 @@ class StoragePath(MatchingModel):
         verbose_name_plural = _("storage paths")
 
 
-class DocumentVersion(models.Model):
+class DocumentBase(models.Model):
+    """Abstract base shared by Document and DocumentVersion.
+
+    Holds the file-level fields (checksums, content, mime_type, added) and
+    the file-serving properties that both concrete models share identically.
+    Subclasses must implement ``source_path`` and ``thumbnail_path``.
+    """
+
+    checksum = models.CharField(
+        _("checksum"),
+        max_length=64,
+        editable=False,
+    )
+
+    archive_checksum = models.CharField(
+        _("archive checksum"),
+        max_length=64,
+        blank=True,
+        null=True,
+        editable=False,
+    )
+
+    content = models.TextField(
+        _("content"),
+        blank=True,
+    )
+
+    mime_type = models.CharField(_("mime type"), max_length=256, editable=False)
+
+    added = models.DateTimeField(
+        _("added"),
+        default=timezone.now,
+        editable=False,
+        db_index=True,
+    )
+
+    class Meta:
+        abstract = True
+
+    def _public_display_name(self) -> str:
+        """Return the human-readable title used in get_public_filename."""
+        return str(self)
+
+    @property
+    def has_archive_version(self) -> bool:
+        return self.archive_filename is not None
+
+    @property
+    def archive_path(self) -> Path | None:
+        if self.archive_filename is not None:
+            return (settings.ARCHIVE_DIR / Path(str(self.archive_filename))).resolve()
+        return None
+
+    @property
+    def archive_file(self):
+        path = self.archive_path
+        if path is None:
+            raise ValueError(f"{self!r} has no archive file")
+        return path.open("rb")
+
+    @property
+    def file_type(self) -> str:
+        return get_default_file_extension(self.mime_type)
+
+    @property
+    def thumbnail_file(self):
+        return self.thumbnail_path.open("rb")
+
+    def get_public_filename(self, *, archive=False, counter=0, suffix=None) -> str:
+        """Return a sanitized filename for download."""
+        result = self._public_display_name()
+
+        if counter:
+            result += f"_{counter:02}"
+
+        if suffix:
+            result += suffix
+
+        if archive:
+            result += ".pdf"
+        else:
+            result += self.file_type
+
+        return pathvalidate.sanitize_filename(result, replacement_text="-")
+
+
+class DocumentVersion(DocumentBase):
     """
     Stores per-version file data for a document.
     Version 1 is created on initial consume; subsequent uploads add higher numbers.
@@ -186,42 +272,12 @@ class DocumentVersion(models.Model):
         help_text=_("Optional short label for this version."),
     )
 
-    added = models.DateTimeField(
-        _("added"),
-        default=timezone.now,
-        editable=False,
-        db_index=True,
-    )
-
-    checksum = models.CharField(
-        _("checksum"),
-        max_length=64,
-        editable=False,
-        help_text=_("SHA-256 checksum of the original file for this version."),
-    )
-
-    archive_checksum = models.CharField(
-        _("archive checksum"),
-        max_length=64,
-        blank=True,
-        null=True,
-        editable=False,
-    )
-
-    content = models.TextField(
-        _("content"),
-        blank=True,
-        help_text=_("OCR text content of this version."),
-    )
-
     page_count = models.PositiveIntegerField(
         _("page count"),
         blank=True,
         null=True,
         validators=[MinValueValidator(1)],
     )
-
-    mime_type = models.CharField(_("mime type"), max_length=256, editable=False)
 
     original_filename = models.CharField(
         _("original filename"),
@@ -262,21 +318,14 @@ class DocumentVersion(models.Model):
     def __str__(self) -> str:
         return f"DocumentVersion {self.version_number} of document {self.document_id}"
 
+    def _public_display_name(self) -> str:
+        return str(self.document)
+
     @property
     def source_path(self) -> Path:
         if self.filename is None:
             raise ValueError(f"DocumentVersion {self.pk} has no filename set")
         return (settings.ORIGINALS_DIR / Path(str(self.filename))).resolve()
-
-    @property
-    def has_archive_version(self) -> bool:
-        return self.archive_filename is not None
-
-    @property
-    def archive_path(self) -> Path | None:
-        if self.archive_filename is not None:
-            return (settings.ARCHIVE_DIR / Path(str(self.archive_filename))).resolve()
-        return None
 
     @property
     def thumbnail_path(self) -> Path:
@@ -287,42 +336,8 @@ class DocumentVersion(models.Model):
     def source_file(self):
         return self.source_path.open("rb")
 
-    @property
-    def archive_file(self):
-        return Path(self.archive_path).open("rb")
 
-    @property
-    def thumbnail_file(self):
-        return self.thumbnail_path.open("rb")
-
-    @property
-    def file_type(self) -> str:
-        return get_default_file_extension(self.mime_type)
-
-    def get_public_filename(self, *, archive=False, counter=0, suffix=None) -> str:
-        """
-        Returns a sanitized filename for download, mirroring Document.get_public_filename().
-        Uses the parent document's title and correspondent for the human-readable name,
-        and this version's own mime_type for the file extension.
-        """
-        doc = self.document  # cached FK access -- no extra query if already in memory
-        result = str(doc)  # "YYYY-MM-DD [Correspondent] Title" from Document.__str__
-
-        if counter:
-            result += f"_{counter:02}"
-
-        if suffix:
-            result += suffix
-
-        if archive:
-            result += ".pdf"
-        else:
-            result += self.file_type
-
-        return pathvalidate.sanitize_filename(result, replacement_text="-")
-
-
-class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-missing]
+class Document(DocumentBase, SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-missing]
     MAX_STORED_FILENAME_LENGTH: Final[int] = 1024
 
     correspondent = models.ForeignKey(
@@ -354,15 +369,6 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
         verbose_name=_("document type"),
     )
 
-    content = models.TextField(
-        _("content"),
-        blank=True,
-        help_text=_(
-            "The raw, text-only data of the document. This field is "
-            "primarily used for searching.",
-        ),
-    )
-
     content_length = models.GeneratedField(
         expression=Length("content"),
         output_field=PositiveIntegerField(default=0),
@@ -372,29 +378,11 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
         help_text="Length of the content field in characters. Automatically maintained by the database for faster statistics computation.",
     )
 
-    mime_type = models.CharField(_("mime type"), max_length=256, editable=False)
-
     tags = models.ManyToManyField(
         Tag,
         related_name="documents",
         blank=True,
         verbose_name=_("tags"),
-    )
-
-    checksum = models.CharField(
-        _("checksum"),
-        max_length=64,
-        editable=False,
-        help_text=_("The checksum of the original document."),
-    )
-
-    archive_checksum = models.CharField(
-        _("archive checksum"),
-        max_length=64,
-        editable=False,
-        blank=True,
-        null=True,
-        help_text=_("The checksum of the archived document."),
     )
 
     page_count = models.PositiveIntegerField(
@@ -418,13 +406,6 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
     modified = models.DateTimeField(
         _("modified"),
         auto_now=True,
-        editable=False,
-        db_index=True,
-    )
-
-    added = models.DateTimeField(
-        _("added"),
-        default=timezone.now,
         editable=False,
         db_index=True,
     )
@@ -520,45 +501,7 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
 
     @property
     def source_file(self):
-        return Path(self.source_path).open("rb")
-
-    @property
-    def has_archive_version(self) -> bool:
-        return self.archive_filename is not None
-
-    @property
-    def archive_path(self) -> Path | None:
-        if self.has_archive_version:
-            return (settings.ARCHIVE_DIR / Path(str(self.archive_filename))).resolve()
-        else:
-            return None
-
-    @property
-    def archive_file(self):
-        return Path(self.archive_path).open("rb")
-
-    def get_public_filename(self, *, archive=False, counter=0, suffix=None) -> str:
-        """
-        Returns a sanitized filename for the document, not including any paths.
-        """
-        result = str(self)
-
-        if counter:
-            result += f"_{counter:02}"
-
-        if suffix:
-            result += suffix
-
-        if archive:
-            result += ".pdf"
-        else:
-            result += self.file_type
-
-        return pathvalidate.sanitize_filename(result, replacement_text="-")
-
-    @property
-    def file_type(self):
-        return get_default_file_extension(self.mime_type)
+        return self.source_path.open("rb")
 
     @property
     def thumbnail_path(self) -> Path:
@@ -567,10 +510,6 @@ class Document(SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-
         webp_file_path = settings.THUMBNAIL_DIR / Path(webp_file_name)
 
         return webp_file_path.resolve()
-
-    @property
-    def thumbnail_file(self):
-        return Path(self.thumbnail_path).open("rb")
 
     @property
     def created_date(self):
