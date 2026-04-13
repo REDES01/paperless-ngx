@@ -28,7 +28,7 @@ def migrate_fulltext_query_field_prefixes(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("documents", "0016_sha256_checksums"),
+        ("documents", "0015_sha256_checksums"),
     ]
 
     operations = [

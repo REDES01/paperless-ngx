@@ -100,7 +100,7 @@ def recompute_checksums(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("documents", "0015_document_version_index_and_more"),
+        ("documents", "0014_savedview_visibility_to_ui_settings"),
     ]
 
     operations = [

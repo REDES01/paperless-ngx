@@ -22,7 +22,7 @@ def migrate_saved_view_rules_forward(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("documents", "0017_migrate_fulltext_query_field_prefixes"),
+        ("documents", "0016_migrate_fulltext_query_field_prefixes"),
     ]
 
     operations = [
