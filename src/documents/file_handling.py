@@ -1,11 +1,17 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 
-from documents.models import Document
 from documents.templating.filepath import validate_filepath_template_and_render
 from documents.templating.utils import convert_format_str_to_template_format
+
+if TYPE_CHECKING:
+    from documents.models import Document
+    from documents.models import DocumentVersion
 
 
 def create_source_path_directory(source_path: Path) -> None:
@@ -41,7 +47,12 @@ def delete_empty_directories(directory: Path, root: Path) -> None:
         directory = directory.parent
 
 
-def generate_unique_filename(doc, *, archive_filename=False) -> Path:
+def generate_unique_filename(
+    doc: Document,
+    version: DocumentVersion | None = None,
+    *,
+    archive_filename: bool = False,
+) -> Path:
     """
     Generates a unique filename for doc in settings.ORIGINALS_DIR.
 
@@ -67,7 +78,11 @@ def generate_unique_filename(doc, *, archive_filename=False) -> Path:
 
     if archive_filename and doc.filename:
         # Generate the full path using the same logic as generate_filename
-        base_generated = generate_filename(doc, archive_filename=archive_filename)
+        base_generated = generate_filename(
+            doc,
+            version,
+            archive_filename=archive_filename,
+        )
 
         # Try to create a simple PDF version based on the original filename
         # but preserve any directory structure from the template
@@ -86,6 +101,7 @@ def generate_unique_filename(doc, *, archive_filename=False) -> Path:
     while True:
         new_filename = generate_filename(
             doc,
+            version,
             counter=counter,
             archive_filename=archive_filename,
         )
@@ -124,24 +140,19 @@ def format_filename(document: Document, template_str: str) -> str | None:
 
 def generate_filename(
     doc: Document,
+    version: DocumentVersion | None = None,
     *,
-    counter=0,
-    archive_filename=False,
-    use_format=True,
+    counter: int = 0,
+    archive_filename: bool = False,
+    use_format: bool = True,
 ) -> Path:
-    # version docs use the root document for formatting, just with a suffix
-    context_doc = doc if doc.root_document_id is None else doc.root_document
-    version_suffix = (
-        f"_v{doc.version_index}"
-        if doc.root_document_id is not None and doc.version_index is not None
-        else ""
-    )
+    version_suffix = f"_v{version.version_number}" if version is not None else ""
     base_path: Path | None = None
 
     # Determine the source of the format string
     if use_format:
-        if context_doc.storage_path is not None:
-            filename_format = context_doc.storage_path.path
+        if doc.storage_path is not None:
+            filename_format = doc.storage_path.path
         elif settings.FILENAME_FORMAT is not None:
             # Maybe convert old to new style
             filename_format = convert_format_str_to_template_format(
@@ -154,7 +165,7 @@ def generate_filename(
 
     # If we have one, render it
     if filename_format is not None:
-        rendered_path: str | None = format_filename(context_doc, filename_format)
+        rendered_path: str | None = format_filename(doc, filename_format)
         if rendered_path:
             base_path = Path(rendered_path)
 
@@ -177,9 +188,7 @@ def generate_filename(
             full_path = Path(final_filename)
     else:
         # No template, use document ID
-        final_filename = (
-            f"{context_doc.pk:07}{version_suffix}{counter_str}{filetype_str}"
-        )
+        final_filename = f"{doc.pk:07}{version_suffix}{counter_str}{filetype_str}"
         full_path = Path(final_filename)
 
     return full_path
