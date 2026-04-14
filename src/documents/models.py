@@ -336,16 +336,6 @@ class DocumentVersion(DocumentBase):
     def source_file(self):
         return self.source_path.open("rb")
 
-    @property
-    def modified(self):
-        """Compatibility shim for conditionals.py which expects .modified.
-
-        DocumentVersion tracks creation time via added; callers that need a
-        last-modified value for HTTP caching use this property.
-        Task 9 will refactor conditionals.py to stop using this path.
-        """
-        return self.added
-
 
 class Document(DocumentBase, SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-missing]
     MAX_STORED_FILENAME_LENGTH: Final[int] = 1024
@@ -524,15 +514,6 @@ class Document(DocumentBase, SoftDeleteModel, ModelWithOwner):  # type: ignore[d
     @property
     def created_date(self):
         return self.created
-
-    def get_effective_content(self) -> str:
-        """Return the content to use for search indexing and matching.
-
-        This is a compatibility shim; since DocumentVersion now holds per-version
-        content, the Document.content cache field already reflects the latest version.
-        Task 9 will remove the callers of this method.
-        """
-        return self.content
 
     def add_nested_tags(self, tags) -> None:
         tag_ids = set()

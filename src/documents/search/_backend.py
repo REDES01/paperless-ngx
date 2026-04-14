@@ -184,7 +184,6 @@ class WriteBatch:
     def add_or_update(
         self,
         document: Document,
-        effective_content: str | None = None,
     ) -> None:
         """
         Add or update a document in the batch.
@@ -195,11 +194,9 @@ class WriteBatch:
 
         Args:
             document: Django Document instance to index
-            effective_content: Override document.content for indexing (used when
-                re-indexing with newer OCR text from document versions)
         """
         self.remove(document.pk)
-        doc = self._backend._build_tantivy_doc(document, effective_content)
+        doc = self._backend._build_tantivy_doc(document)
         self._writer.add_document(doc)
 
     def remove(self, doc_id: int) -> None:
@@ -275,16 +272,9 @@ class TantivyBackend:
     def _build_tantivy_doc(
         self,
         document: Document,
-        effective_content: str | None = None,
     ) -> tantivy.Document:
-        """Build a tantivy Document from a Django Document instance.
-
-        ``effective_content`` overrides ``document.content`` for indexing —
-        used when re-indexing a root document with a newer version's OCR text.
-        """
-        content = (
-            effective_content if effective_content is not None else document.content
-        )
+        """Build a tantivy Document from a Django Document instance."""
+        content = document.content
 
         doc = tantivy.Document()
 
@@ -395,7 +385,6 @@ class TantivyBackend:
     def add_or_update(
         self,
         document: Document,
-        effective_content: str | None = None,
     ) -> None:
         """
         Add or update a single document with file locking.
@@ -405,11 +394,10 @@ class TantivyBackend:
 
         Args:
             document: Django Document instance to index
-            effective_content: Override document.content for indexing
         """
         self._ensure_open()
         with self.batch_update(lock_timeout=5.0) as batch:
-            batch.add_or_update(document, effective_content)
+            batch.add_or_update(document)
 
     def remove(self, doc_id: int) -> None:
         """
@@ -805,10 +793,7 @@ class TantivyBackend:
         try:
             writer = new_index.writer()
             for document in iter_wrapper(documents):
-                doc = self._build_tantivy_doc(
-                    document,
-                    document.get_effective_content(),
-                )
+                doc = self._build_tantivy_doc(document)
                 writer.add_document(doc)
             writer.commit()
             new_index.reload()

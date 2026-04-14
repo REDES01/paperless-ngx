@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import FieldError
 from django.db.models import Case
 from django.db.models import CharField
 from django.db.models import Count
@@ -172,16 +171,10 @@ class TitleContentFilter(Filter):
             logger.warning(
                 "Deprecated document filter parameter 'title_content' used; use `text` instead.",
             )
-            try:
-                return qs.filter(
-                    Q(title__icontains=value) | Q(effective_content__icontains=value),
-                )
-            except FieldError:
-                return qs.filter(
-                    Q(title__icontains=value) | Q(content__icontains=value),
-                )
-        else:
-            return qs
+            return qs.filter(
+                Q(title__icontains=value) | Q(content__icontains=value),
+            )
+        return qs
 
 
 @extend_schema_field(serializers.CharField)
@@ -190,14 +183,7 @@ class EffectiveContentFilter(Filter):
         value = value.strip() if isinstance(value, str) else value
         if not value:
             return qs
-        try:
-            return qs.filter(
-                **{f"effective_content__{self.lookup_expr}": value},
-            )
-        except FieldError:
-            return qs.filter(
-                **{f"content__{self.lookup_expr}": value},
-            )
+        return qs.filter(**{f"content__{self.lookup_expr}": value})
 
 
 @extend_schema_field(serializers.BooleanField)
