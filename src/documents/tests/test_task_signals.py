@@ -10,7 +10,7 @@ from documents.data_models import DocumentMetadataOverrides
 from documents.data_models import DocumentSource
 from documents.models import Document
 from documents.models import PaperlessTask
-from documents.signals.handlers import add_to_index
+from documents.signals import document_consumption_finished
 from documents.signals.handlers import before_task_publish_handler
 from documents.signals.handlers import task_failure_handler
 from documents.signals.handlers import task_postrun_handler
@@ -207,44 +207,17 @@ class TestTaskSignalHandler(DirectoriesMixin, TestCase):
 
         self.assertEqual(celery.states.FAILURE, task.status)
 
-    def test_add_to_index_indexes_root_once_for_root_documents(self) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
+    def test_add_to_index_calls_add_or_update(self) -> None:
+        doc = Document.objects.create(
+            title="test",
+            checksum="abc",
             mime_type="application/pdf",
         )
-
         with mock.patch("documents.search.get_backend") as mock_get_backend:
             mock_backend = mock.MagicMock()
             mock_get_backend.return_value = mock_backend
-            add_to_index(sender=None, document=root)
-
-        mock_backend.add_or_update.assert_called_once_with(root, effective_content="")
-
-    def test_add_to_index_reindexes_root_for_version_documents(self) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
-            mime_type="application/pdf",
-        )
-        version = Document.objects.create(
-            title="version",
-            checksum="version",
-            mime_type="application/pdf",
-            root_document=root,
-        )
-
-        with mock.patch("documents.search.get_backend") as mock_get_backend:
-            mock_backend = mock.MagicMock()
-            mock_get_backend.return_value = mock_backend
-            add_to_index(sender=None, document=version)
-
-        self.assertEqual(mock_backend.add_or_update.call_count, 1)
-        self.assertEqual(
-            mock_backend.add_or_update.call_args_list[0].args[0].id,
-            version.id,
-        )
-        self.assertEqual(
-            mock_backend.add_or_update.call_args_list[0].kwargs,
-            {"effective_content": version.content},
-        )
+            document_consumption_finished.send(
+                sender=self.__class__,
+                document=doc,
+            )
+            mock_backend.add_or_update.assert_called_once_with(doc)
