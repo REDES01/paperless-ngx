@@ -964,7 +964,9 @@ class DocumentViewSet(
 
         data = request.data.copy()
         serializer_partial = partial
-        if content_updated and content_doc.id != root_doc.id:
+        # content_doc is a DocumentVersion (separate table); write goes there.
+        content_is_versioned = isinstance(content_doc, DocumentVersion)
+        if content_updated and content_is_versioned:
             if updated_content is None:
                 raise ValidationError({"content": ["This field may not be null."]})
             data.pop("content", None)
@@ -978,11 +980,20 @@ class DocumentViewSet(
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
 
-        if content_updated and content_doc.id != root_doc.id:
-            content_doc.content = (
-                str(updated_content) if updated_content is not None else ""
-            )
-            content_doc.save(update_fields=["content", "modified"])
+        if content_updated and content_is_versioned:
+            new_content = str(updated_content) if updated_content is not None else ""
+            content_doc.content = new_content
+            # DocumentVersion has no database ``modified`` field.
+            content_doc.save(update_fields=["content"])
+
+            # Keep Document.content in sync when the latest version is edited.
+            is_latest = not DocumentVersion.objects.filter(
+                document=root_doc,
+                version_number__gt=content_doc.version_number,
+            ).exists()
+            if is_latest:
+                root_doc.content = new_content
+                root_doc.save(update_fields=["content"])
 
         refreshed_doc = self.get_queryset().get(pk=root_doc.pk)
         response_data = self.get_serializer(refreshed_doc).data

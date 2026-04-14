@@ -336,6 +336,16 @@ class DocumentVersion(DocumentBase):
     def source_file(self):
         return self.source_path.open("rb")
 
+    @property
+    def modified(self):
+        """Compatibility shim for conditionals.py which expects .modified.
+
+        DocumentVersion tracks creation time via added; callers that need a
+        last-modified value for HTTP caching use this property.
+        Task 9 will refactor conditionals.py to stop using this path.
+        """
+        return self.added
+
 
 class Document(DocumentBase, SoftDeleteModel, ModelWithOwner):  # type: ignore[django-manager-missing]
     MAX_STORED_FILENAME_LENGTH: Final[int] = 1024
