@@ -312,7 +312,6 @@ markers = [
   "date_parsing: Tests which cover date parsing from content or filename",
   "management: Tests which cover management commands/functionality",
   "search: Tests for the Tantivy search backend",
-  "profiling: Performance profiling tests (run with -m profiling --override-ini='addopts=')",
 ]
 
 [tool.pytest_env]
