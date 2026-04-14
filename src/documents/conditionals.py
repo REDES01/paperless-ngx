@@ -4,6 +4,7 @@ from typing import Any
 
 from django.conf import settings
 from django.core.cache import cache
+from django.shortcuts import get_object_or_404
 
 from documents.caching import CACHE_5_MINUTES
 from documents.caching import CACHE_50_MINUTES
@@ -13,7 +14,7 @@ from documents.caching import CLASSIFIER_VERSION_KEY
 from documents.caching import get_thumbnail_modified_key
 from documents.classifier import DocumentClassifier
 from documents.models import Document
-from documents.versioning import resolve_effective_document_by_pk
+from documents.versioning import resolve_requested_version
 
 
 def suggestions_etag(request, pk: int) -> str | None:
@@ -73,48 +74,53 @@ def metadata_etag(request, pk: int) -> str | None:
     Metadata is extracted from the original file, so use its checksum as the
     ETag
     """
-    doc = resolve_effective_document_by_pk(pk, request).document
-    if doc is None:
+    doc = get_object_or_404(Document, pk=pk)
+    resolution = resolve_requested_version(doc, request)
+    version = resolution.version
+    if version is None:
         return None
-    return doc.checksum
+    return version.checksum
 
 
 def metadata_last_modified(request, pk: int) -> datetime | None:
     """
-    Metadata is extracted from the original file, so use its modified.  Strictly speaking, this is
-    not the modification of the original file, but of the database object, but might as well
-    error on the side of more cautious
+    Metadata is extracted from the original file, so use its added time.
     """
-    doc = resolve_effective_document_by_pk(pk, request).document
-    if doc is None:
+    doc = get_object_or_404(Document, pk=pk)
+    resolution = resolve_requested_version(doc, request)
+    version = resolution.version
+    if version is None:
         return None
-    return doc.modified
+    return version.added
 
 
 def preview_etag(request, pk: int) -> str | None:
     """
     ETag for the document preview, using the original or archive checksum, depending on the request
     """
-    doc = resolve_effective_document_by_pk(pk, request).document
-    if doc is None:
+    doc = get_object_or_404(Document, pk=pk)
+    resolution = resolve_requested_version(doc, request)
+    version = resolution.version
+    if version is None:
         return None
     use_original = (
         hasattr(request, "query_params")
         and "original" in request.query_params
         and request.query_params["original"] == "true"
     )
-    return doc.checksum if use_original else doc.archive_checksum
+    return version.checksum if use_original else version.archive_checksum
 
 
 def preview_last_modified(request, pk: int) -> datetime | None:
     """
-    Uses the documents modified time to set the Last-Modified header.  Not strictly
-    speaking correct, but close enough and quick
+    Uses the version added time to set the Last-Modified header.
     """
-    doc = resolve_effective_document_by_pk(pk, request).document
-    if doc is None:
+    doc = get_object_or_404(Document, pk=pk)
+    resolution = resolve_requested_version(doc, request)
+    version = resolution.version
+    if version is None:
         return None
-    return doc.modified
+    return version.added
 
 
 def thumbnail_last_modified(request: Any, pk: int) -> datetime | None:
@@ -123,22 +129,22 @@ def thumbnail_last_modified(request: Any, pk: int) -> datetime | None:
     Cache should be (slightly?) faster than filesystem
     """
     try:
-        doc = resolve_effective_document_by_pk(pk, request).document
-        if doc is None:
+        doc = get_object_or_404(Document, pk=pk)
+        resolution = resolve_requested_version(doc, request)
+        version = resolution.version
+        if version is None:
             return None
-        if not doc.thumbnail_path.exists():
+        if not version.thumbnail_path.exists():
             return None
-        # Use the effective document id for cache key
-        doc_key = get_thumbnail_modified_key(doc.id)
+        doc_key = get_thumbnail_modified_key(version.id)
 
         cache_hit = cache.get(doc_key)
         if cache_hit is not None:
             cache.touch(doc_key, CACHE_50_MINUTES)
             return cache_hit
 
-        # No cache, get the timestamp and cache the datetime
         last_modified = datetime.fromtimestamp(
-            doc.thumbnail_path.stat().st_mtime,
+            version.thumbnail_path.stat().st_mtime,
             tz=UTC,
         )
         cache.set(doc_key, last_modified, CACHE_50_MINUTES)

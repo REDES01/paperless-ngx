@@ -7,7 +7,6 @@ from auditlog.models import LogEntry  # type: ignore[import-untyped]
 from django.contrib.auth.models import Permission
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import FieldError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
@@ -619,31 +618,21 @@ class TestDocumentVersioningApi(DirectoriesMixin, APITestCase):
 
 
 class TestVersionAwareFilters:
-    def test_title_content_filter_falls_back_to_content(self) -> None:
+    def test_title_content_filter_queries_content_directly(self) -> None:
         queryset = mock.Mock()
-        fallback_queryset = mock.Mock()
-        queryset.filter.side_effect = [FieldError("missing field"), fallback_queryset]
 
-        result = TitleContentFilter().filter(queryset, " latest ")
+        TitleContentFilter().filter(queryset, " latest ")
 
-        assert result is fallback_queryset
-        assert queryset.filter.call_count == 2
+        assert queryset.filter.call_count == 1
 
-    def test_effective_content_filter_falls_back_to_content_lookup(self) -> None:
+    def test_effective_content_filter_queries_content_directly(self) -> None:
         queryset = mock.Mock()
-        fallback_queryset = mock.Mock()
-        queryset.filter.side_effect = [FieldError("missing field"), fallback_queryset]
 
-        result = EffectiveContentFilter(lookup_expr="icontains").filter(
-            queryset,
-            " latest ",
-        )
+        EffectiveContentFilter(lookup_expr="icontains").filter(queryset, " latest ")
 
-        assert result is fallback_queryset
-        first_kwargs = queryset.filter.call_args_list[0].kwargs
-        second_kwargs = queryset.filter.call_args_list[1].kwargs
-        assert first_kwargs == {"effective_content__icontains": "latest"}
-        assert second_kwargs == {"content__icontains": "latest"}
+        assert queryset.filter.call_count == 1
+        kwargs = queryset.filter.call_args_list[0].kwargs
+        assert kwargs == {"content__icontains": "latest"}
 
     def test_effective_content_filter_returns_input_for_empty_values(self) -> None:
         queryset = mock.Mock()
