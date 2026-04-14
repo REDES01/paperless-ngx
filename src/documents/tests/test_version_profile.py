@@ -359,7 +359,10 @@ class TestScenarioB_VersionedDocsList:
         for i, q in enumerate(queries):
             print(f"  [{i}] {q['sql'][:120]}  --  {q['time']}s")  # noqa: T201
 
-        assert len(queries) <= 8
+        # 10 queries: 2 content_type/guardian warmup + COUNT + main SELECT +
+        # prefetch versions (replaces old correlated subquery) + tags +
+        # custom_fields + notes + guardian object perms.
+        assert len(queries) <= 10
 
     def test_b2_memory_versioned_list(self):
         _, peak_kib, delta_kib = measure_memory(
