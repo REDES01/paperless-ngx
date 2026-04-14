@@ -48,19 +48,12 @@ class _TestMatchingBase(TestCase):
 
 
 class TestMatching(_TestMatchingBase):
-    def test_matches_uses_latest_version_content_for_root_documents(self) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
+    def test_matches_uses_document_content(self) -> None:
+        doc = Document.objects.create(
+            title="doc",
+            checksum="doc",
             mime_type="application/pdf",
-            content="root content without token",
-        )
-        Document.objects.create(
-            title="v1",
-            checksum="v1",
-            mime_type="application/pdf",
-            root_document=root,
-            content="latest version contains keyword",
+            content="document contains keyword",
         )
         tag = Tag.objects.create(
             name="tag",
@@ -68,23 +61,14 @@ class TestMatching(_TestMatchingBase):
             matching_algorithm=Tag.MATCH_ANY,
         )
 
-        self.assertTrue(matching.matches(tag, root))
+        self.assertTrue(matching.matches(tag, doc))
 
-    def test_matches_does_not_fall_back_to_root_content_when_version_exists(
-        self,
-    ) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
+    def test_matches_does_not_match_when_content_lacks_keyword(self) -> None:
+        doc = Document.objects.create(
+            title="doc",
+            checksum="doc",
             mime_type="application/pdf",
-            content="root contains keyword",
-        )
-        Document.objects.create(
-            title="v1",
-            checksum="v1",
-            mime_type="application/pdf",
-            root_document=root,
-            content="latest version without token",
+            content="document without the token",
         )
         tag = Tag.objects.create(
             name="tag",
@@ -92,7 +76,7 @@ class TestMatching(_TestMatchingBase):
             matching_algorithm=Tag.MATCH_ANY,
         )
 
-        self.assertFalse(matching.matches(tag, root))
+        self.assertFalse(matching.matches(tag, doc))
 
     def test_match_none(self) -> None:
         self._test_matching(

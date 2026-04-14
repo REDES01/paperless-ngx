@@ -1860,7 +1860,10 @@ class TestWorkflows(
 
         self.assertEqual(doc.title, "Doc {created_year]")
 
-    def test_document_updated_workflow_ignores_version_documents(self) -> None:
+    def test_document_updated_workflow_runs_on_versioned_document(self) -> None:
+        """Workflows apply to documents even when they have DocumentVersion records."""
+        from documents.models import DocumentVersion
+
         trigger = WorkflowTrigger.objects.create(
             type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
         )
@@ -1875,30 +1878,27 @@ class TestWorkflows(
         workflow.triggers.add(trigger)
         workflow.actions.add(action)
 
-        root_doc = Document.objects.create(
-            title="root",
+        doc = Document.objects.create(
+            title="doc",
             correspondent=self.c,
-            original_filename="root.pdf",
+            original_filename="doc.pdf",
         )
-        version_doc = Document.objects.create(
-            title="version",
-            correspondent=self.c,
-            original_filename="version.pdf",
-            root_document=root_doc,
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum="abc",
+            mime_type="application/pdf",
         )
 
-        run_workflows(WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED, version_doc)
+        run_workflows(WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED, doc)
 
-        root_doc.refresh_from_db()
-        version_doc.refresh_from_db()
-
-        self.assertIsNone(root_doc.owner)
-        self.assertIsNone(version_doc.owner)
-        self.assertFalse(
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user2)
+        self.assertTrue(
             WorkflowRun.objects.filter(
                 workflow=workflow,
                 type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
-                document=version_doc,
+                document=doc,
             ).exists(),
         )
 
@@ -2200,7 +2200,10 @@ class TestWorkflows(
         doc.refresh_from_db()
         self.assertEqual(doc.owner, self.user2)
 
-    def test_workflow_scheduled_trigger_ignores_version_documents(self) -> None:
+    def test_workflow_scheduled_trigger_runs_on_versioned_document(self) -> None:
+        """Scheduled workflows run against documents that have DocumentVersion records."""
+        from documents.models import DocumentVersion
+
         trigger = WorkflowTrigger.objects.create(
             type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
             schedule_offset_days=1,
@@ -2217,41 +2220,30 @@ class TestWorkflows(
         workflow.triggers.add(trigger)
         workflow.actions.add(action)
 
-        root_doc = Document.objects.create(
-            title="root",
+        doc = Document.objects.create(
+            title="doc",
             correspondent=self.c,
-            original_filename="root.pdf",
+            original_filename="doc.pdf",
             added=timezone.now() - timedelta(days=10),
         )
-        version_doc = Document.objects.create(
-            title="version",
-            correspondent=self.c,
-            original_filename="version.pdf",
-            root_document=root_doc,
-            added=timezone.now() - timedelta(days=10),
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum="abc",
+            mime_type="application/pdf",
         )
 
         tasks.check_scheduled_workflows()
 
-        root_doc.refresh_from_db()
-        version_doc.refresh_from_db()
-
-        self.assertEqual(root_doc.owner, self.user2)
-        self.assertIsNone(version_doc.owner)
+        doc.refresh_from_db()
+        self.assertEqual(doc.owner, self.user2)
         self.assertEqual(
             WorkflowRun.objects.filter(
                 workflow=workflow,
                 type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
-                document=root_doc,
+                document=doc,
             ).count(),
             1,
-        )
-        self.assertFalse(
-            WorkflowRun.objects.filter(
-                workflow=workflow,
-                type=WorkflowTrigger.WorkflowTriggerType.SCHEDULED,
-                document=version_doc,
-            ).exists(),
         )
 
     @mock.patch("documents.models.Document.objects.filter", autospec=True)

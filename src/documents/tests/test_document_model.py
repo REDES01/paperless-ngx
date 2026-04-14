@@ -102,27 +102,34 @@ class TestDocument(TestCase):
 
             self.assertEqual(len(actual_deletions), 2)
 
-    def test_delete_root_deletes_versions(self) -> None:
-        root = Document.objects.create(
+    def test_delete_document_cascades_to_versions(self) -> None:
+        from documents.models import DocumentVersion
+
+        doc = Document.objects.create(
             correspondent=Correspondent.objects.create(name="Test0"),
             title="Head",
             content="content",
             checksum="checksum",
             mime_type="application/pdf",
         )
-        Document.objects.create(
-            root_document=root,
-            correspondent=root.correspondent,
-            title="Version",
-            content="content",
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum="checksum",
+            mime_type="application/pdf",
+        )
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=2,
             checksum="checksum2",
             mime_type="application/pdf",
         )
 
-        root.delete()
+        self.assertEqual(DocumentVersion.objects.filter(document=doc).count(), 2)
+        doc.delete()
 
         self.assertEqual(Document.objects.count(), 0)
-        self.assertEqual(Document.deleted_objects.count(), 2)
+        self.assertEqual(DocumentVersion.objects.count(), 0)
 
     def test_file_name(self) -> None:
         doc = Document(
@@ -156,45 +163,27 @@ class TestDocument(TestCase):
         )
         self.assertEqual(doc.get_public_filename(), "2020-12-25 test")
 
-    def test_suggestion_content_uses_latest_version_content_for_root_documents(
-        self,
-    ) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
+    def test_suggestion_content_returns_document_content(self) -> None:
+        doc = Document.objects.create(
+            title="doc",
+            checksum="doc",
             mime_type="application/pdf",
-            content="outdated root content",
-        )
-        version = Document.objects.create(
-            title="v1",
-            checksum="v1",
-            mime_type="application/pdf",
-            root_document=root,
-            content="latest version content",
+            content="the document content",
         )
 
-        self.assertEqual(root.suggestion_content, version.content)
+        self.assertEqual(doc.suggestion_content, "the document content")
 
-    def test_content_length_is_per_document_row_for_versions(self) -> None:
-        root = Document.objects.create(
-            title="root",
-            checksum="root",
+    def test_content_length_reflects_document_content(self) -> None:
+        doc = Document.objects.create(
+            title="doc",
+            checksum="doc",
             mime_type="application/pdf",
             content="abc",
         )
-        version = Document.objects.create(
-            title="v1",
-            checksum="v1",
-            mime_type="application/pdf",
-            root_document=root,
-            content="abcdefgh",
-        )
 
-        root.refresh_from_db()
-        version.refresh_from_db()
+        doc.refresh_from_db()
 
-        self.assertEqual(root.content_length, 3)
-        self.assertEqual(version.content_length, 8)
+        self.assertEqual(doc.content_length, 3)
 
 
 def test_suggestion_content() -> None:
