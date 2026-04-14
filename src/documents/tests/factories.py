@@ -67,6 +67,27 @@ class DocumentFactory(DjangoModelFactory):
     document_type = None
     storage_path = None
 
+    @factory.post_generation
+    def with_version(self, create, extracted, **kwargs):
+        """Create an initial DocumentVersion(version_number=1) matching the Document's fields."""
+        if not create:
+            return
+        from documents.models import DocumentVersion
+
+        DocumentVersion.objects.create(
+            document=self,
+            version_number=1,
+            checksum=self.checksum or "default",
+            archive_checksum=self.archive_checksum,
+            content=self.content,
+            page_count=self.page_count,
+            mime_type=self.mime_type or "application/pdf",
+            original_filename=self.original_filename,
+            filename=self.filename,
+            archive_filename=self.archive_filename,
+            added=self.added,
+        )
+
 
 class DocumentVersionFactory(DjangoModelFactory):
     class Meta:

@@ -36,6 +36,7 @@ from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import DocumentType
+from documents.models import DocumentVersion
 from documents.models import MatchingModel
 from documents.models import Note
 from documents.models import SavedView
@@ -316,10 +317,17 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             filename=Path(filename).name,
             mime_type="application/pdf",
         )
+        dv = DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum=doc.checksum or "default",
+            mime_type=doc.mime_type,
+            filename=doc.filename,
+        )
 
         if TYPE_CHECKING:
             assert isinstance(self.dirs.thumbnail_dir, Path), self.dirs.thumbnail_dir
-        with (self.dirs.thumbnail_dir / f"{doc.pk:07d}.webp").open("wb") as f:
+        with dv.thumbnail_path.open("wb") as f:
             f.write(content_thumbnail)
 
         response = self.client.get(f"/api/documents/{doc.pk}/download/")
@@ -369,8 +377,15 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             mime_type="application/pdf",
             owner=user1,
         )
+        dv = DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum=doc.checksum or "default",
+            mime_type=doc.mime_type,
+            filename=doc.filename,
+        )
 
-        with (Path(self.dirs.thumbnail_dir) / f"{doc.pk:07d}.webp").open("wb") as f:
+        with dv.thumbnail_path.open("wb") as f:
             f.write(content_thumbnail)
 
         response = self.client.get(f"/api/documents/{doc.pk}/download/")
@@ -403,6 +418,14 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             filename="my_document.pdf",
             archive_filename="archived.pdf",
             mime_type="application/pdf",
+        )
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum=doc.checksum or "default",
+            mime_type=doc.mime_type,
+            filename=doc.filename,
+            archive_filename=doc.archive_filename,
         )
 
         with Path(doc.source_path).open("wb") as f:
@@ -445,6 +468,14 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             filename="my_document.pdf",
             archive_filename="archived.pdf",
             mime_type="application/pdf",
+        )
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum=doc.checksum or "default",
+            mime_type=doc.mime_type,
+            filename=doc.filename,
+            archive_filename=doc.archive_filename,
         )
 
         with Path(doc.source_path).open("wb") as f:
@@ -585,16 +616,21 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             mime_type="application/pdf",
             owner=self.user,
         )
-        version_doc = Document.objects.create(
-            title="Version",
+        DocumentVersion.objects.create(
+            document=root_doc,
+            version_number=1,
+            checksum="123",
+            mime_type="application/pdf",
+        )
+        v2 = DocumentVersion.objects.create(
+            document=root_doc,
+            version_number=2,
             checksum="456",
             mime_type="application/pdf",
-            root_document=root_doc,
-            owner=self.user,
         )
 
         response = self.client.delete(
-            f"/api/documents/{root_doc.pk}/versions/{version_doc.pk}/",
+            f"/api/documents/{root_doc.pk}/versions/{v2.pk}/",
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
@@ -605,7 +641,7 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(response.data[0]["action"], "update")
         self.assertEqual(
             response.data[0]["changes"],
-            {"Version Deleted": ["None", version_doc.pk]},
+            {"Version Deleted": ["None", v2.pk]},
         )
 
     @override_settings(AUDIT_LOG_ENABLED=False)
@@ -1452,17 +1488,24 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         )
 
     def test_document_filters_use_latest_version_content(self) -> None:
-        root = Document.objects.create(
+        doc = Document.objects.create(
             title="versioned root",
-            checksum="root",
+            checksum="v2",
             mime_type="application/pdf",
-            content="root-content",
+            content="latest-version-content",
         )
-        version = Document.objects.create(
-            title="versioned root",
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
             checksum="v1",
             mime_type="application/pdf",
-            root_document=root,
+            content="old-content",
+        )
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=2,
+            checksum="v2",
+            mime_type="application/pdf",
             content="latest-version-content",
         )
 
@@ -1472,8 +1515,8 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         results = response.data["results"]
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["id"], root.id)
-        self.assertEqual(results[0]["content"], version.content)
+        self.assertEqual(results[0]["id"], doc.id)
+        self.assertEqual(results[0]["content"], "latest-version-content")
 
         response = self.client.get(
             "/api/documents/?title_content=latest-version-content",
@@ -1481,7 +1524,7 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         results = response.data["results"]
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["id"], root.id)
+        self.assertEqual(results[0]["id"], doc.id)
 
     def test_create_wrong_endpoint(self) -> None:
         response = self.client.post(
@@ -2042,6 +2085,15 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             archive_checksum="A",
             archive_filename="archive.pdf",
         )
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum=doc.checksum or "default",
+            mime_type=doc.mime_type,
+            filename=doc.filename,
+            archive_filename=doc.archive_filename,
+            archive_checksum=doc.archive_checksum,
+        )
 
         source_file: Path = (
             Path(__file__).parent
@@ -2082,6 +2134,13 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             filename="file.pdf",
             mime_type="application/pdf",
         )
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum=doc.checksum or "default",
+            mime_type=doc.mime_type,
+            filename=doc.filename,
+        )
 
         shutil.copy(Path(__file__).parent / "samples" / "simple.pdf", doc.source_path)
 
@@ -2104,6 +2163,15 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             archive_filename="file.pdf",
             archive_checksum="B",
             checksum="A",
+        )
+        DocumentVersion.objects.create(
+            document=doc,
+            version_number=1,
+            checksum=doc.checksum,
+            mime_type=doc.mime_type,
+            filename=doc.filename,
+            archive_filename=doc.archive_filename,
+            archive_checksum=doc.archive_checksum,
         )
 
         response = self.client.get(f"/api/documents/{doc.pk}/metadata/")

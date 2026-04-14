@@ -381,52 +381,20 @@ class TestBulkEdit(DirectoriesMixin, TestCase):
             [self.doc3.id, self.doc4.id, self.doc5.id],
         )
 
-    def test_delete_root_document_deletes_all_versions(self) -> None:
-        version = Document.objects.create(
-            checksum="A-v1",
-            title="A version",
-            root_document=self.doc1,
+    def test_delete_document_deletes_document_versions_via_cascade(self) -> None:
+        from documents.models import DocumentVersion
+
+        v1 = DocumentVersion.objects.create(
+            document=self.doc1,
+            version_number=1,
+            checksum="A",
+            mime_type="application/pdf",
         )
 
         bulk_edit.delete([self.doc1.id])
 
         self.assertFalse(Document.objects.filter(id=self.doc1.id).exists())
-        self.assertFalse(Document.objects.filter(id=version.id).exists())
-
-    def test_delete_version_document_keeps_root(self) -> None:
-        version = Document.objects.create(
-            checksum="A-v1",
-            title="A version",
-            root_document=self.doc1,
-        )
-
-        bulk_edit.delete([version.id])
-
-        self.assertTrue(Document.objects.filter(id=self.doc1.id).exists())
-        self.assertFalse(Document.objects.filter(id=version.id).exists())
-
-    def test_resolve_root_and_source_doc_latest_version_prefers_newest_version(
-        self,
-    ) -> None:
-        version1 = Document.objects.create(
-            checksum="B-v1",
-            title="B version 1",
-            root_document=self.doc2,
-        )
-        version2 = Document.objects.create(
-            checksum="B-v2",
-            title="B version 2",
-            root_document=self.doc2,
-        )
-
-        root_doc, source_doc = bulk_edit._resolve_root_and_source_doc(
-            self.doc2,
-            source_mode="latest_version",
-        )
-
-        self.assertEqual(root_doc.id, self.doc2.id)
-        self.assertEqual(source_doc.id, version2.id)
-        self.assertNotEqual(source_doc.id, version1.id)
+        self.assertFalse(DocumentVersion.objects.filter(id=v1.id).exists())
 
     @mock.patch("documents.tasks.bulk_update_documents.delay")
     def test_set_permissions(self, m) -> None:
@@ -662,20 +630,11 @@ class TestPDFActions(DirectoriesMixin, TestCase):
 
     @mock.patch("pikepdf.open")
     @mock.patch("documents.tasks.consume_file.s")
-    def test_merge_uses_latest_version_source_for_root_selection(
+    def test_merge_uses_document_source_path(
         self,
         mock_consume_file,
         mock_open_pdf,
     ) -> None:
-        version_file = self.dirs.scratch_dir / "sample2_version_merge.pdf"
-        shutil.copy(self.doc2.source_path, version_file)
-        version = Document.objects.create(
-            checksum="B-v1",
-            title="B version 1",
-            root_document=self.doc2,
-            filename=version_file,
-            mime_type="application/pdf",
-        )
         fake_pdf = mock.MagicMock()
         fake_pdf.pdf_version = "1.7"
         fake_pdf.pages = [mock.Mock()]
@@ -684,7 +643,7 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         result = bulk_edit.merge([self.doc2.id])
 
         self.assertEqual(result, "OK")
-        mock_open_pdf.assert_called_once_with(str(version.source_path))
+        mock_open_pdf.assert_called_once_with(str(self.doc2.source_path))
         mock_consume_file.assert_not_called()
 
     @mock.patch("documents.bulk_edit.delete.si")
@@ -898,21 +857,12 @@ class TestPDFActions(DirectoriesMixin, TestCase):
     @mock.patch("documents.bulk_edit.group")
     @mock.patch("pikepdf.open")
     @mock.patch("documents.tasks.consume_file.s")
-    def test_split_uses_latest_version_source_for_root_selection(
+    def test_split_uses_document_source_path(
         self,
         mock_consume_file,
         mock_open_pdf,
         mock_group,
     ) -> None:
-        version_file = self.dirs.scratch_dir / "sample2_version_split.pdf"
-        shutil.copy(self.doc2.source_path, version_file)
-        version = Document.objects.create(
-            checksum="B-v1",
-            title="B version 1",
-            root_document=self.doc2,
-            filename=version_file,
-            mime_type="application/pdf",
-        )
         fake_pdf = mock.MagicMock()
         fake_pdf.pages = [mock.Mock(), mock.Mock()]
         mock_open_pdf.return_value.__enter__.return_value = fake_pdf
@@ -921,7 +871,7 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         result = bulk_edit.split([self.doc2.id], [[1], [2]])
 
         self.assertEqual(result, "OK")
-        mock_open_pdf.assert_called_once_with(version.source_path)
+        mock_open_pdf.assert_called_once_with(self.doc2.source_path)
         mock_consume_file.assert_not_called()
         mock_group.return_value.delay.assert_not_called()
 
@@ -1099,17 +1049,12 @@ class TestPDFActions(DirectoriesMixin, TestCase):
     @mock.patch("documents.data_models.magic.from_file", return_value="application/pdf")
     @mock.patch("documents.tasks.consume_file.delay")
     @mock.patch("pikepdf.open")
-    def test_rotate_explicit_selection_uses_root_source_when_root_selected(
+    def test_rotate_uses_document_source_path(
         self,
         mock_open,
         mock_consume_delay,
         mock_magic,
     ):
-        Document.objects.create(
-            checksum="B-v1",
-            title="B version 1",
-            root_document=self.doc2,
-        )
         fake_pdf = mock.MagicMock()
         fake_pdf.pages = [mock.Mock()]
         mock_open.return_value.__enter__.return_value = fake_pdf
@@ -1117,7 +1062,6 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         result = bulk_edit.rotate(
             [self.doc2.id],
             90,
-            source_mode="explicit_selection",
         )
 
         self.assertEqual(result, "OK")
@@ -1151,17 +1095,12 @@ class TestPDFActions(DirectoriesMixin, TestCase):
     @mock.patch("documents.data_models.magic.from_file", return_value="application/pdf")
     @mock.patch("documents.tasks.consume_file.delay")
     @mock.patch("pikepdf.open")
-    def test_delete_pages_explicit_selection_uses_root_source_when_root_selected(
+    def test_delete_pages_uses_document_source_path(
         self,
         mock_open,
         mock_consume_delay,
         mock_magic,
     ):
-        Document.objects.create(
-            checksum="B-v1",
-            title="B version 1",
-            root_document=self.doc2,
-        )
         fake_pdf = mock.MagicMock()
         fake_pdf.pages = [mock.Mock(), mock.Mock()]
         mock_open.return_value.__enter__.return_value = fake_pdf
@@ -1169,7 +1108,6 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         result = bulk_edit.delete_pages(
             [self.doc2.id],
             [1],
-            source_mode="explicit_selection",
         )
 
         self.assertEqual(result, "OK")
@@ -1328,18 +1266,13 @@ class TestPDFActions(DirectoriesMixin, TestCase):
     @mock.patch("documents.tasks.consume_file.delay")
     @mock.patch("pikepdf.new")
     @mock.patch("pikepdf.open")
-    def test_edit_pdf_explicit_selection_uses_root_source_when_root_selected(
+    def test_edit_pdf_uses_document_source_path(
         self,
         mock_open,
         mock_new,
         mock_consume_delay,
         mock_magic,
     ):
-        Document.objects.create(
-            checksum="B-v1",
-            title="B version 1",
-            root_document=self.doc2,
-        )
         fake_pdf = mock.MagicMock()
         fake_pdf.pages = [mock.Mock()]
         mock_open.return_value.__enter__.return_value = fake_pdf
@@ -1351,7 +1284,6 @@ class TestPDFActions(DirectoriesMixin, TestCase):
             [self.doc2.id],
             operations=[{"page": 1}],
             update_document=True,
-            source_mode="explicit_selection",
         )
 
         self.assertEqual(result, "OK")
@@ -1481,17 +1413,12 @@ class TestPDFActions(DirectoriesMixin, TestCase):
     @mock.patch("documents.data_models.magic.from_file", return_value="application/pdf")
     @mock.patch("documents.tasks.consume_file.delay")
     @mock.patch("pikepdf.open")
-    def test_remove_password_explicit_selection_uses_root_source_when_root_selected(
+    def test_remove_password_uses_document_source_path(
         self,
         mock_open,
         mock_consume_delay,
         mock_magic,
     ) -> None:
-        Document.objects.create(
-            checksum="A-v1",
-            title="A version 1",
-            root_document=self.doc1,
-        )
         fake_pdf = mock.MagicMock()
         mock_open.return_value.__enter__.return_value = fake_pdf
 
@@ -1499,7 +1426,6 @@ class TestPDFActions(DirectoriesMixin, TestCase):
             [self.doc1.id],
             password="secret",
             update_document=True,
-            source_mode="explicit_selection",
         )
 
         self.assertEqual(result, "OK")

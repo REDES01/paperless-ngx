@@ -476,19 +476,16 @@ def check_scheduled_workflows() -> None:
                 match trigger.schedule_date_field:
                     case WorkflowTrigger.ScheduleDateField.ADDED:
                         documents = Document.objects.filter(
-                            root_document__isnull=True,
                             added__lte=threshold,
                         )
 
                     case WorkflowTrigger.ScheduleDateField.CREATED:
                         documents = Document.objects.filter(
-                            root_document__isnull=True,
                             created__lte=threshold,
                         )
 
                     case WorkflowTrigger.ScheduleDateField.MODIFIED:
                         documents = Document.objects.filter(
-                            root_document__isnull=True,
                             modified__lte=threshold,
                         )
 
@@ -529,7 +526,6 @@ def check_scheduled_workflows() -> None:
                         ]
 
                         documents = Document.objects.filter(
-                            root_document__isnull=True,
                             id__in=matched_ids,
                         )
 

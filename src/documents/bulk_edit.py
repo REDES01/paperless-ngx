@@ -29,8 +29,6 @@ from documents.plugins.helpers import DocumentsStatusManager
 from documents.tasks import bulk_update_documents
 from documents.tasks import consume_file
 from documents.tasks import update_document_content_maybe_archive_file
-from documents.versioning import get_latest_version_for_root
-from documents.versioning import get_root_document
 
 if TYPE_CHECKING:
     from django.contrib.auth.models import User
@@ -79,23 +77,6 @@ def restore_archive_serial_numbers(backup: dict[int, int | None]) -> None:
     for doc_id, asn in backup.items():
         Document.objects.filter(pk=doc_id).update(archive_serial_number=asn)
     logger.info(f"Restored archive serial numbers for documents {list(backup.keys())}")
-
-
-def _resolve_root_and_source_doc(
-    doc: Document,
-    *,
-    source_mode: SourceMode = SourceModeChoices.LATEST_VERSION,
-) -> tuple[Document, Document]:
-    root_doc = get_root_document(doc)
-
-    if source_mode == SourceModeChoices.EXPLICIT_SELECTION:
-        return root_doc, doc
-
-    # Version IDs are explicit by default, only a selected root resolves to latest
-    if doc.root_document_id is not None:
-        return root_doc, doc
-
-    return root_doc, get_latest_version_for_root(root_doc)
 
 
 def set_correspondent(
@@ -334,20 +315,10 @@ def modify_custom_fields(
 @shared_task
 def delete(doc_ids: list[int]) -> Literal["OK"]:
     try:
-        root_ids = (
-            Document.objects.filter(id__in=doc_ids, root_document__isnull=True)
-            .values_list("id", flat=True)
-            .distinct()
-        )
-        version_ids = (
-            Document.objects.filter(root_document_id__in=root_ids)
-            .exclude(id__in=doc_ids)
-            .values_list("id", flat=True)
-            .distinct()
-        )
-        delete_ids = list({*doc_ids, *version_ids})
+        delete_ids = list(doc_ids)
 
         Document.objects.filter(id__in=delete_ids).delete()
+        # DocumentVersion rows are removed by CASCADE automatically.
 
         from documents.search import get_backend
 
@@ -413,7 +384,7 @@ def rotate(
     )
     docs_by_id = {
         doc.id: doc
-        for doc in Document.objects.select_related("root_document").filter(
+        for doc in Document.objects.filter(
             id__in=doc_ids,
         )
     }
@@ -422,11 +393,7 @@ def rotate(
         doc = docs_by_id.get(doc_id)
         if doc is None:
             continue
-        root_doc, source_doc = _resolve_root_and_source_doc(
-            doc,
-            source_mode=source_mode,
-        )
-        docs_by_root_id.setdefault(root_doc.id, (root_doc, source_doc))
+        docs_by_root_id.setdefault(doc.id, (doc, doc))
 
     import pikepdf
 
@@ -482,7 +449,7 @@ def merge(
     logger.info(
         f"Attempting to merge {len(doc_ids)} documents into a single document.",
     )
-    qs = Document.objects.select_related("root_document").filter(id__in=doc_ids)
+    qs = Document.objects.filter(id__in=doc_ids)
     docs_by_id = {doc.id: doc for doc in qs}
     affected_docs: list[int] = []
     import pikepdf
@@ -495,10 +462,7 @@ def merge(
         doc = docs_by_id.get(doc_id)
         if doc is None:
             continue
-        _, source_doc = _resolve_root_and_source_doc(
-            doc,
-            source_mode=source_mode,
-        )
+        source_doc = doc
         try:
             doc_path = (
                 source_doc.archive_path
@@ -593,11 +557,8 @@ def split(
     logger.info(
         f"Attempting to split document {doc_ids[0]} into {len(pages)} documents",
     )
-    doc = Document.objects.select_related("root_document").get(id=doc_ids[0])
-    _, source_doc = _resolve_root_and_source_doc(
-        doc,
-        source_mode=source_mode,
-    )
+    doc = Document.objects.get(id=doc_ids[0])
+    source_doc = doc
     import pikepdf
 
     consume_tasks = []
@@ -673,11 +634,9 @@ def delete_pages(
     logger.info(
         f"Attempting to delete pages {pages} from {len(doc_ids)} documents",
     )
-    doc = Document.objects.select_related("root_document").get(id=doc_ids[0])
-    root_doc, source_doc = _resolve_root_and_source_doc(
-        doc,
-        source_mode=source_mode,
-    )
+    doc = Document.objects.get(id=doc_ids[0])
+    root_doc = doc
+    source_doc = doc
     pages = sorted(pages)  # sort pages to avoid index issues
     import pikepdf
 
@@ -736,11 +695,9 @@ def edit_pdf(
     logger.info(
         f"Editing PDF of document {doc_ids[0]} with {len(operations)} operations",
     )
-    doc = Document.objects.select_related("root_document").get(id=doc_ids[0])
-    root_doc, source_doc = _resolve_root_and_source_doc(
-        doc,
-        source_mode=source_mode,
-    )
+    doc = Document.objects.get(id=doc_ids[0])
+    root_doc = doc
+    source_doc = doc
     import pikepdf
 
     pdf_docs: list[pikepdf.Pdf] = []
@@ -860,11 +817,9 @@ def remove_password(
     import pikepdf
 
     for doc_id in doc_ids:
-        doc = Document.objects.select_related("root_document").get(id=doc_id)
-        root_doc, source_doc = _resolve_root_and_source_doc(
-            doc,
-            source_mode=source_mode,
-        )
+        doc = Document.objects.get(id=doc_id)
+        root_doc = doc
+        source_doc = doc
         try:
             logger.info(
                 f"Attempting password removal from document {doc_ids[0]}",
