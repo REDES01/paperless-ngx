@@ -41,25 +41,6 @@ def get_version_by_pk(doc: Document, version_pk: int) -> DocumentVersion | None:
     return DocumentVersion.objects.filter(pk=version_pk, document=doc).first()
 
 
-def get_root_document(doc: Document) -> Document:
-    """Return the root document.
-
-    In the new model, every Document IS the root. This is a compatibility stub
-    used by bulk_edit.py; Task 10 will refactor the callers.
-    """
-    return doc
-
-
-def get_latest_version_for_root(doc: Document) -> Document:
-    """Return the document to use as the version source.
-
-    In the new model, DocumentVersion holds per-version files.  This stub
-    returns the document itself so that bulk_edit callers that have not yet
-    been updated to the new model do not crash. Task 10 will replace this.
-    """
-    return doc
-
-
 def resolve_requested_version(
     doc: Document,
     request: Any,

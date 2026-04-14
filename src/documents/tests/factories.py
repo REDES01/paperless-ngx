@@ -70,10 +70,8 @@ class DocumentFactory(DjangoModelFactory):
     @factory.post_generation
     def with_version(self, create, extracted, **kwargs):
         """Create an initial DocumentVersion(version_number=1) matching the Document's fields."""
-        if not create:
+        if not create or not extracted:
             return
-        from documents.models import DocumentVersion
-
         DocumentVersion.objects.create(
             document=self,
             version_number=1,
