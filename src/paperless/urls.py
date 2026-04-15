@@ -125,6 +125,10 @@ urlpatterns = [
                     name="statistics",
                 ),
                 re_path(
+                    "^ml/",
+                    include("paperless_ml.urls"),
+                ),
+                re_path(
                     "^documents/",
                     include(
                         [

@@ -143,6 +143,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "drf_spectacular_sidecar",
     "treenode",
+    "paperless_ml",
     *env_apps,
 ]
 
