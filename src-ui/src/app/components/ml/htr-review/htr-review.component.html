@@ -1,0 +1,59 @@
+<pngx-page-header title="Handwriting review" i18n-title>
+  <div class="d-flex align-items-center gap-3">
+    <div class="form-check form-switch mb-0">
+      <input class="form-check-input" type="checkbox" id="optInSwitch" [(ngModel)]="optIn" />
+      <label class="form-check-label small" for="optInSwitch" i18n>Contribute to training</label>
+    </div>
+    <button class="btn btn-sm btn-outline-primary" (click)="loadQueue()" i18n>Refresh</button>
+  </div>
+</pngx-page-header>
+
+<div *ngIf="loading" class="text-center p-4">
+  <div class="spinner-border" role="status"></div>
+</div>
+
+<div *ngIf="!loading && usingMock" class="alert alert-secondary small py-2" i18n>
+  Review queue endpoint unreachable — showing mock data. The data pipeline should expose <code>GET /api/ml/htr/queue/</code> returning flagged regions without corrections.
+</div>
+
+<div *ngIf="!loading && documents.length === 0 && !usingMock" class="alert alert-info" i18n>
+  No documents waiting for handwriting review.
+</div>
+
+<div *ngFor="let doc of documents" class="card mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <div>
+      <strong>{{ doc.title }}</strong>
+      <small class="text-muted ms-2">{{ doc.uploaded_at }}</small>
+    </div>
+    <a class="btn btn-sm btn-outline-secondary" [routerLink]="['/documents', doc.document_id]" i18n>
+      Open document
+    </a>
+  </div>
+  <div class="card-body">
+    <div *ngFor="let region of doc.regions" class="htr-region mb-3 pb-3 border-bottom">
+      <div class="row align-items-center">
+        <div class="col-md-4">
+          <div class="region-image d-flex align-items-center justify-content-center bg-light text-muted small text-center p-2">
+            <span>handwritten region<br /><code class="small">{{ region.crop_s3_url }}</code></span>
+          </div>
+        </div>
+        <div class="col-md-8">
+          <div class="d-flex justify-content-between mb-1">
+            <small class="text-muted" i18n>Predicted</small>
+            <small [class]="confidenceClass(region.htr_confidence)">
+              <ng-container i18n>confidence</ng-container> {{ (region.htr_confidence * 100).toFixed(0) }}%
+            </small>
+          </div>
+          <div class="text-muted small mb-2">{{ region.htr_output }}</div>
+          <label class="small text-muted" i18n>Correction</label>
+          <textarea class="form-control mb-2" rows="2" [(ngModel)]="region.corrected_text"></textarea>
+          <button class="btn btn-sm btn-primary" (click)="saveCorrection(doc, region)" [disabled]="region.saved">
+            <span *ngIf="!region.saved" i18n>Save correction</span>
+            <span *ngIf="region.saved" i18n>Saved</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

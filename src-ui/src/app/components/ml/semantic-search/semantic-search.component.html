@@ -1,0 +1,98 @@
+<pngx-page-header title="Semantic search" i18n-title></pngx-page-header>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row g-2 align-items-center">
+      <div class="col-md">
+        <input
+          type="text"
+          class="form-control form-control-lg"
+          placeholder="Try: budget report 2024"
+          i18n-placeholder
+          [(ngModel)]="query"
+          (keyup.enter)="search()"
+        />
+      </div>
+      <div class="col-md-auto">
+        <select class="form-select form-select-lg" [(ngModel)]="mode">
+          <option value="semantic" i18n>Semantic</option>
+          <option value="keyword" i18n>Keyword</option>
+          <option value="hybrid" i18n>Hybrid</option>
+        </select>
+      </div>
+      <div class="col-md-auto">
+        <button class="btn btn-primary btn-lg" (click)="search()" [disabled]="loading || !query.trim()" i18n>
+          Search
+        </button>
+      </div>
+    </div>
+    <div class="text-muted small mt-2" i18n>
+      Searches handwritten + printed text via the retrieval model. Click thumbs to send relevance signals to the data pipeline.
+    </div>
+  </div>
+</div>
+
+<div *ngIf="loading" class="text-center p-4">
+  <div class="spinner-border" role="status"></div>
+</div>
+
+<div *ngIf="!loading && hasSearched && usingMock" class="alert alert-secondary small py-2" i18n>
+  ML serving unreachable — showing mock results. Wire <code>/ml-api</code> to the fastapi_server to get live predictions.
+</div>
+
+<div *ngIf="!loading && hasSearched && fallbackToKeyword && !usingMock" class="alert alert-warning small py-2" i18n>
+  Semantic similarity below threshold — falling back to keyword search is recommended.
+</div>
+
+<div *ngIf="!loading && hasSearched && results.length === 0 && !usingMock" class="alert alert-warning" i18n>
+  No results above the similarity threshold. Try rephrasing or switch to keyword mode.
+</div>
+
+<div *ngIf="!loading && results.length > 0" class="text-muted small mb-2">
+  <span>{{ results.length }} <ng-container i18n>results</ng-container></span>
+  <span *ngIf="modelVersion"> &middot; {{ modelVersion }}</span>
+  <span *ngIf="inferenceMs > 0"> &middot; {{ inferenceMs }} ms</span>
+</div>
+
+<div *ngFor="let result of results" class="card mb-2 result-card">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start">
+      <div class="flex-grow-1 me-3">
+        <a
+          [routerLink]="['/documents', result.document_id]"
+          (click)="recordClick(result)"
+          class="result-title"
+        >
+          <ng-container i18n>Document</ng-container> {{ shortId(result.document_id) }}
+          <small class="text-muted ms-2"><ng-container i18n>chunk</ng-container> #{{ result.chunk_index }}</small>
+        </a>
+        <div class="text-muted mt-1">{{ result.chunk_text }}</div>
+      </div>
+      <div class="text-end">
+        <span [class]="scoreClass(result.similarity_score)">{{ result.similarity_score.toFixed(2) }}</span>
+        <div class="mt-2 btn-group btn-group-sm" role="group">
+          <button
+            type="button"
+            class="btn btn-outline-success"
+            [class.active]="result.feedback === 'up'"
+            (click)="rate(result, 'up')"
+            title="Relevant"
+            i18n-title
+          >
+            👍
+          </button>
+          <button
+            type="button"
+            class="btn btn-outline-danger"
+            [class.active]="result.feedback === 'down'"
+            (click)="rate(result, 'down')"
+            title="Not relevant"
+            i18n-title
+          >
+            👎
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

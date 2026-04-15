@@ -10,6 +10,8 @@ import { AppFrameComponent } from './components/app-frame/app-frame.component'
 import { DashboardComponent } from './components/dashboard/dashboard.component'
 import { DocumentAsnComponent } from './components/document-asn/document-asn.component'
 import { DocumentDetailComponent } from './components/document-detail/document-detail.component'
+import { HtrReviewComponent } from './components/ml/htr-review/htr-review.component'
+import { SemanticSearchComponent } from './components/ml/semantic-search/semantic-search.component'
 import { DocumentListComponent } from './components/document-list/document-list.component'
 import { DocumentAttributesComponent } from './components/manage/document-attributes/document-attributes.component'
 import { MailComponent } from './components/manage/mail/mail.component'
@@ -244,6 +246,16 @@ export const routes: Routes = [
           },
           componentName: 'ConfigComponent',
         },
+      },
+      {
+        path: 'ml/htr-review',
+        component: HtrReviewComponent,
+        data: { componentName: 'HtrReviewComponent' },
+      },
+      {
+        path: 'ml/search',
+        component: SemanticSearchComponent,
+        data: { componentName: 'SemanticSearchComponent' },
       },
       {
         path: 'tasks',

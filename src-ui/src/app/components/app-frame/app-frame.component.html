@@ -97,6 +97,16 @@
               <i-bs class="me-2" name="files"></i-bs><span><ng-container i18n>Documents</ng-container></span>
             </a>
           </li>
+          <li class="nav-item app-link">
+            <a class="nav-link" routerLink="ml/htr-review" routerLinkActive="active" (click)="closeMenu()">
+              <i-bs class="me-2" name="pencil"></i-bs><span><ng-container i18n>Handwriting review</ng-container></span>
+            </a>
+          </li>
+          <li class="nav-item app-link">
+            <a class="nav-link" routerLink="ml/search" routerLinkActive="active" (click)="closeMenu()">
+              <i-bs class="me-2" name="search"></i-bs><span><ng-container i18n>Semantic search</ng-container></span>
+            </a>
+          </li>
         </ul>
 
         <div class="nav-group mt-3 mb-1" *pngxIfPermissions="{ action: PermissionAction.View, type: PermissionType.SavedView }">

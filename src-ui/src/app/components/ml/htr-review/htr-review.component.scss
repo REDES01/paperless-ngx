@@ -1,0 +1,11 @@
+.region-image {
+  height: 100px;
+  border: 1px dashed var(--bs-border-color);
+  border-radius: 4px;
+}
+
+.htr-region:last-child {
+  border-bottom: none !important;
+  margin-bottom: 0 !important;
+  padding-bottom: 0 !important;
+}
