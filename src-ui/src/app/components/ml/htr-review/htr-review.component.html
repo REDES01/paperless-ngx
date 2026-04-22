@@ -34,8 +34,15 @@
     <div *ngFor="let region of doc.regions" class="htr-region mb-3 pb-3 border-bottom">
       <div class="row align-items-center">
         <div class="col-md-4">
-          <div class="region-image d-flex align-items-center justify-content-center bg-light text-muted small text-center p-2">
-            <span>handwritten region<br /><code class="small">{{ region.crop_s3_url }}</code></span>
+          <img
+            [src]="cropUrl(region.crop_s3_url)"
+            [alt]="'handwritten region ' + region.region_id"
+            class="region-image img-fluid rounded border bg-light"
+            (error)="onCropError($event)"
+          />
+          <div *ngIf="region.cropError" class="text-muted small text-center p-2 mt-1">
+            <code>{{ region.crop_s3_url }}</code>
+            <div class="text-danger">image unavailable</div>
           </div>
         </div>
         <div class="col-md-8">

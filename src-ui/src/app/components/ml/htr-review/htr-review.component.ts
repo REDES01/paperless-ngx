@@ -15,6 +15,7 @@ interface HtrRegion {
   corrected_text: string
   htr_confidence: number
   saved: boolean
+  cropError?: boolean
 }
 
 interface HtrDocument {
@@ -87,6 +88,37 @@ export class HtrReviewComponent implements OnInit {
         this.toast.showInfo('Correction saved (local)')
       },
     })
+  }
+
+  // Transform the MinIO s3:// URL into an HTTP URL the browser can load.
+  // Assumes MinIO's S3 API is exposed on port 9000 of the same host that
+  // serves Paperless, and the bucket is configured for anonymous download.
+  cropUrl(s3Url: string): string {
+    if (!s3Url || !s3Url.startsWith('s3://')) return ''
+    const path = s3Url.substring('s3://'.length)
+    const host = window.location.hostname
+    return `http://${host}:9000/${path}`
+  }
+
+  onCropError(event: Event): void {
+    const img = event.target as HTMLImageElement
+    // Walk up to the region object via Angular's data binding
+    // Simpler: hide the img and show fallback text via *ngIf on parent.
+    // We mark the region's cropError flag; template shows fallback.
+    const card = img.closest('.col-md-4')
+    if (card) {
+      img.style.display = 'none'
+    }
+    // Find which region this belongs to and flag it
+    for (const doc of this.documents) {
+      for (const region of doc.regions) {
+        if (region.crop_s3_url && img.src.endsWith(
+            region.crop_s3_url.substring('s3://'.length))) {
+          region.cropError = true
+          return
+        }
+      }
+    }
   }
 
   confidenceClass(confidence: number): string {
