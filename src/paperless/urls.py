@@ -62,6 +62,7 @@ from paperless.views import ProfileView
 from paperless.views import SocialAccountProvidersView
 from paperless.views import TOTPView
 from paperless.views import UserViewSet
+from paperless_ml.views import ml_serving_proxy
 from paperless_mail.views import MailAccountViewSet
 from paperless_mail.views import MailRuleViewSet
 from paperless_mail.views import OauthCallbackView
@@ -279,6 +280,8 @@ urlpatterns = [
             ],
         ),
     ),
+    # Phase 5: /ml-api/<path> proxies to Yikai's FastAPI serving container.
+    re_path(r"^ml-api/(?P<path>.+)$", ml_serving_proxy, name="ml_serving_proxy"),
     re_path(r"share/(?P<slug>\w+)/?$", SharedLinkView.as_view()),
     re_path(r"^favicon.ico$", FaviconView.as_view(), name="favicon"),
     re_path(r"admin/", admin.site.urls),

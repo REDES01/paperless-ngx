@@ -13,12 +13,14 @@ NOT Paperless's own DB.
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 
 import psycopg
+import requests
 from django.contrib.auth.decorators import login_required
-from django.http import JsonResponse, HttpResponseBadRequest
+from django.http import JsonResponse, HttpResponse, HttpResponseBadRequest
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
@@ -209,3 +211,67 @@ def search_feedback(request):
         "id": str(row["id"]),
         "created_at": _isoformat(row["created_at"]),
     }, status=201)
+
+# ───────────────────────────────────────────────────────────────
+# Phase 5: /ml-api proxy to the ML serving layer (Yikai's FastAPI)
+# ───────────────────────────────────────────────────────────────
+#
+# Browsers cannot reach the FastAPI container on paperless_ml_net directly,
+# and the FastAPI service has no auth of its own. This view proxies requests
+# from /ml-api/<path> through Paperless (which enforces login) to the serving
+# FastAPI container on the shared Docker network.
+#
+# The UI calls /ml-api/predict/search and /ml-api/health; the view forwards
+# the method + body + query string verbatim and passes the response back.
+
+ML_SERVING_URL = os.environ.get(
+    "PAPERLESS_ML_SERVING_URL",
+    "http://fastapi_server:8000",
+).rstrip("/")
+ML_SERVING_TIMEOUT = int(os.environ.get("PAPERLESS_ML_SERVING_TIMEOUT", "30"))
+
+# Only forward specific endpoints. Blocking arbitrary paths prevents the proxy
+# from being used as a generic SSRF vector for other services on the network.
+_ML_SERVING_ALLOWED_PATHS = {
+    "health",
+    "predict/htr",
+    "predict/search",
+}
+
+
+@login_required
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def ml_serving_proxy(request, path: str):
+    """
+    Forward /ml-api/<path> to ML_SERVING_URL/<path>.
+    Requires an authenticated Paperless session; login_required enforces this.
+    """
+    if path not in _ML_SERVING_ALLOWED_PATHS:
+        return _err(f"path not allowed: {path}", status=404)
+
+    url = f"{ML_SERVING_URL}/{path}"
+    try:
+        upstream = requests.request(
+            method=request.method,
+            url=url,
+            params=request.GET.dict() or None,
+            data=request.body or None,
+            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+            timeout=ML_SERVING_TIMEOUT,
+        )
+    except requests.Timeout:
+        log.warning("ml_api: timeout to %s after %ds", url, ML_SERVING_TIMEOUT)
+        return JsonResponse({"error": "serving timeout"}, status=504)
+    except requests.ConnectionError as exc:
+        log.warning("ml_api: cannot reach %s: %s", url, exc)
+        return JsonResponse({"error": "serving unavailable"}, status=502)
+    except requests.RequestException as exc:
+        log.exception("ml_api: unexpected error to %s: %s", url, exc)
+        return JsonResponse({"error": "serving error"}, status=502)
+
+    return HttpResponse(
+        upstream.content,
+        status=upstream.status_code,
+        content_type=upstream.headers.get("Content-Type", "application/json"),
+    )
