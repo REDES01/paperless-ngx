@@ -67,19 +67,16 @@ def htr_queue(request):
             p.id            AS page_id,
             r.crop_s3_url   AS crop_s3_url,
             r.htr_output    AS htr_output,
-            r.htr_confidence AS htr_confidence,
-            p.htr_flagged   AS page_flagged
+            r.htr_confidence AS htr_confidence
         FROM handwritten_regions r
         JOIN document_pages p ON p.id = r.page_id
         JOIN documents d      ON d.id = p.document_id
-        WHERE NOT EXISTS (
+        WHERE p.htr_flagged = TRUE
+          AND NOT EXISTS (
               SELECT 1 FROM htr_corrections c WHERE c.region_id = r.id
           )
           AND d.deleted_at IS NULL
-        -- Flag-first ordering: low-confidence (flagged) regions bubble up,
-        -- but non-flagged regions still appear so the reviewer can correct
-        -- anything wrong — even when the model was confident-but-wrong.
-        ORDER BY p.htr_flagged DESC, d.uploaded_at DESC, r.htr_confidence ASC
+        ORDER BY d.uploaded_at DESC, r.created_at ASC
         LIMIT 200;
     """
     try:
@@ -106,7 +103,6 @@ def htr_queue(request):
             "crop_s3_url": row["crop_s3_url"],
             "htr_output": row["htr_output"] or "",
             "htr_confidence": float(row["htr_confidence"]) if row["htr_confidence"] is not None else 0.0,
-            "page_flagged":   bool(row["page_flagged"]),
         })
 
     return JsonResponse(list(grouped.values()), safe=False)
